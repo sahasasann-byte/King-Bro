@@ -9,7 +9,11 @@ import {
   LockKeyhole,
   Zap,
   Radio,
-  CircleDot
+  CircleDot,
+  Play,
+  Square,
+  ScanLine,
+  CandlestickChart
 } from "lucide-react";
 
 import "./styles.css";
@@ -163,6 +167,297 @@ function MarketCard({ item }) {
 }
 
 
+function ScannerPanel({
+  scanners,
+  scannerBusy,
+  onIndexStart,
+  onIndexStop,
+  onStockStart,
+  onStockStop
+}) {
+  const indexOn =
+    Boolean(
+      scanners?.index?.enabled
+    );
+
+  const stockEnabled =
+    Boolean(
+      scanners?.stocks?.enabled
+    );
+
+  const stockRunning =
+    Boolean(
+      scanners?.stocks?.running
+    );
+
+  const panelStyle = {
+    marginTop: "18px",
+    padding: "18px",
+  };
+
+  const gridStyle = {
+    display: "grid",
+    gridTemplateColumns:
+      "repeat(auto-fit, minmax(260px, 1fr))",
+    gap: "14px",
+  };
+
+  const cardStyle = {
+    padding: "16px",
+    borderRadius: "18px",
+    border:
+      "1px solid rgba(120,255,220,0.12)",
+    background:
+      "rgba(5,25,28,0.28)",
+    backdropFilter: "blur(14px)",
+  };
+
+  const headStyle = {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "12px",
+    marginBottom: "12px",
+  };
+
+  const statusStyle = (active) => ({
+    fontSize: "11px",
+    fontWeight: 800,
+    letterSpacing: "0.08em",
+    color: active
+      ? "#69ffbf"
+      : "#ff7f92",
+  });
+
+  const btnRow = {
+    display: "flex",
+    gap: "10px",
+    marginTop: "14px",
+    flexWrap: "wrap",
+  };
+
+  const btnBase = {
+    border: "1px solid rgba(115,255,225,0.22)",
+    background:
+      "rgba(0, 255, 190, 0.08)",
+    color: "#dffef7",
+    padding: "10px 14px",
+    borderRadius: "12px",
+    fontWeight: 800,
+    cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "7px",
+  };
+
+  return (
+    <section
+      className="overview glass"
+      style={panelStyle}
+    >
+
+      <div className="overview-head">
+
+        <div>
+          <h3>
+            Signal Scanner Control
+          </h3>
+
+          <small className="green">
+            ● V7 backend scanner controls
+          </small>
+        </div>
+
+        <div className="live-badge">
+          <ScanLine />
+          SCANNER
+        </div>
+
+      </div>
+
+
+      <div style={gridStyle}>
+
+        <div style={cardStyle}>
+
+          <div style={headStyle}>
+
+            <div>
+              <b>
+                INDEX SIG
+              </b>
+
+              <div
+                style={{
+                  marginTop: "4px",
+                  fontSize: "12px",
+                  opacity: 0.7,
+                }}
+              >
+                NIFTY 50 + SENSEX
+              </div>
+            </div>
+
+            <span
+              style={
+                statusStyle(indexOn)
+              }
+            >
+              {indexOn
+                ? "RUNNING"
+                : "STOPPED"}
+            </span>
+
+          </div>
+
+
+          <div
+            style={{
+              fontSize: "12px",
+              lineHeight: 1.6,
+              opacity: 0.78,
+            }}
+          >
+            1M + 5M + 15M signal
+            engine with option confirmation.
+          </div>
+
+
+          <div style={btnRow}>
+
+            <button
+              type="button"
+              style={btnBase}
+              disabled={
+                scannerBusy ===
+                "index-start"
+              }
+              onClick={onIndexStart}
+            >
+              <Play size={15} />
+              START
+            </button>
+
+            <button
+              type="button"
+              style={{
+                ...btnBase,
+                background:
+                  "rgba(255,80,110,0.08)",
+                border:
+                  "1px solid rgba(255,110,130,0.22)",
+              }}
+              disabled={
+                scannerBusy ===
+                "index-stop"
+              }
+              onClick={onIndexStop}
+            >
+              <Square size={15} />
+              STOP
+            </button>
+
+          </div>
+
+        </div>
+
+
+        <div style={cardStyle}>
+
+          <div style={headStyle}>
+
+            <div>
+              <b>
+                STOCK SIG
+              </b>
+
+              <div
+                style={{
+                  marginTop: "4px",
+                  fontSize: "12px",
+                  opacity: 0.7,
+                }}
+              >
+                Midcap + Smallcap universe
+              </div>
+            </div>
+
+            <span
+              style={
+                statusStyle(
+                  stockRunning
+                )
+              }
+            >
+              {stockRunning
+                ? "RUNNING"
+                : stockEnabled
+                  ? "ARMED"
+                  : "STOPPED"}
+            </span>
+
+          </div>
+
+
+          <div
+            style={{
+              fontSize: "12px",
+              lineHeight: 1.6,
+              opacity: 0.78,
+            }}
+          >
+            Control is ready.
+            Actual stock universe feed
+            will be wired in the next
+            backend module.
+          </div>
+
+
+          <div style={btnRow}>
+
+            <button
+              type="button"
+              style={btnBase}
+              disabled={
+                scannerBusy ===
+                "stock-start"
+              }
+              onClick={onStockStart}
+            >
+              <Play size={15} />
+              START
+            </button>
+
+            <button
+              type="button"
+              style={{
+                ...btnBase,
+                background:
+                  "rgba(255,80,110,0.08)",
+                border:
+                  "1px solid rgba(255,110,130,0.22)",
+              }}
+              disabled={
+                scannerBusy ===
+                "stock-stop"
+              }
+              onClick={onStockStop}
+            >
+              <Square size={15} />
+              STOP
+            </button>
+
+          </div>
+
+        </div>
+
+      </div>
+
+    </section>
+  );
+}
+
+
 function App() {
 
   const [feed, setFeed] =
@@ -188,6 +483,64 @@ function App() {
   const [loginError, setLoginError] =
     React.useState("");
 
+  const [scanners, setScanners] =
+    React.useState({
+      index: {
+        enabled: true,
+        symbols: [
+          "NIFTY 50",
+          "SENSEX",
+        ],
+      },
+
+      stocks: {
+        enabled: false,
+        running: false,
+      },
+    });
+
+  const [
+    scannerBusy,
+    setScannerBusy
+  ] = React.useState("");
+
+
+  const loadScanners =
+    React.useCallback(
+      async () => {
+
+        try {
+
+          const response =
+            await fetch(
+              API +
+                "/api/scanners"
+            );
+
+          if (!response.ok) {
+            return;
+          }
+
+          const data =
+            await response.json();
+
+          setScanners(data);
+
+        } catch (_) {
+          // Keep UI alive if backend is sleeping.
+        }
+
+      },
+      []
+    );
+
+
+  React.useEffect(() => {
+
+    loadScanners();
+
+  }, [loadScanners]);
+
 
   React.useEffect(() => {
 
@@ -210,7 +563,7 @@ function App() {
           WS_URL
         );
 
-      } catch (error) {
+      } catch (_) {
 
         reconnectTimer =
           setTimeout(
@@ -379,7 +732,7 @@ function App() {
 
 
       ws.onerror = () => {
-        // onclose handles reconnect
+        // onclose handles retry
       };
 
 
@@ -588,11 +941,6 @@ function App() {
       setTotp("");
 
 
-      /*
-       * IMPORTANT:
-       * Wrong TOTP should always bring
-       * the login UI back.
-       */
       setStatus(
         (prev) => ({
           ...prev,
@@ -615,14 +963,60 @@ function App() {
   }
 
 
-  /*
-   * CRITICAL FIX
-   *
-   * Login panel stays visible until
-   * the actual live market feed connects.
-   *
-   * broker_connected alone is NOT enough.
-   */
+  async function scannerAction(
+    path,
+    busyName
+  ) {
+
+    setScannerBusy(
+      busyName
+    );
+
+    try {
+
+      const response =
+        await fetch(
+          API + path,
+          {
+            method: "POST",
+          }
+        );
+
+      const data =
+        await response.json();
+
+      if (
+        data?.message
+      ) {
+        setMessage(
+          data.message
+        );
+      } else {
+        setMessage(
+          "Scanner state updated."
+        );
+      }
+
+      await loadScanners();
+
+    } catch (error) {
+
+      setMessage(
+        `Scanner error: ${
+          error?.message ||
+          String(error)
+        }`
+      );
+
+    } finally {
+
+      setScannerBusy("");
+
+    }
+
+  }
+
+
   const showLoginPanel =
     !status.feed_connected ||
     Boolean(loginError);
@@ -702,19 +1096,9 @@ function App() {
           </div>
 
 
-          <div
-            className=
-              "nav disabled"
-          >
-
-            <Zap />
-
+          <div className="nav">
+            <CandlestickChart />
             Strategies
-
-            <span className="soon">
-              SOON
-            </span>
-
           </div>
 
         </nav>
@@ -971,6 +1355,42 @@ function App() {
           />
 
         </section>
+
+
+        <ScannerPanel
+          scanners={scanners}
+          scannerBusy={
+            scannerBusy
+          }
+
+          onIndexStart={() =>
+            scannerAction(
+              "/api/scanners/index/start",
+              "index-start"
+            )
+          }
+
+          onIndexStop={() =>
+            scannerAction(
+              "/api/scanners/index/stop",
+              "index-stop"
+            )
+          }
+
+          onStockStart={() =>
+            scannerAction(
+              "/api/scanners/stocks/start",
+              "stock-start"
+            )
+          }
+
+          onStockStop={() =>
+            scannerAction(
+              "/api/scanners/stocks/stop",
+              "stock-stop"
+            )
+          }
+        />
 
 
         <section
