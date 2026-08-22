@@ -1,5 +1,6 @@
 import asyncio
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timezone, date
 from typing import Optional, Any
 from collections import deque
 
@@ -22,7 +23,7 @@ from config import settings
 
 app = FastAPI(
     title="King Bro Terminal API",
-    version="5.2.0",
+    version="5.3.0",
 )
 
 
@@ -891,6 +892,44 @@ def _field(row, *names):
     return None
 
 
+def _clean_upper(value):
+    return re.sub(r"[^A-Z0-9]+", "", str(value or "").upper())
+
+
+def _parse_expiry(value):
+    """
+    Parse the expiry formats commonly returned by Kotak search_scrip.
+    Returns a date or None. We never invent an expiry.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+
+    # ISO-like values sometimes include a time component.
+    iso_candidate = raw[:10]
+    try:
+        return date.fromisoformat(iso_candidate)
+    except Exception:
+        pass
+
+    compact = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
+
+    formats = (
+        "%d%b%Y",   # 27AUG2026
+        "%d%b%y",   # 27AUG26
+        "%d%m%Y",   # 27082026
+        "%Y%m%d",   # 20260827
+    )
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(compact, fmt).date()
+        except Exception:
+            continue
+
+    return None
+
+
 def _normalise_contract(row: dict[str, Any]):
     strike = number(
         _field(
@@ -925,7 +964,7 @@ def _normalise_contract(row: dict[str, Any]):
             "optionType",
         )
         or ""
-    ).upper()
+    ).upper().strip()
 
     trading_symbol = str(
         _field(
@@ -935,7 +974,7 @@ def _normalise_contract(row: dict[str, Any]):
             "display_symbol",
         )
         or ""
-    )
+    ).strip()
 
     symbol_name = str(
         _field(
@@ -945,21 +984,62 @@ def _normalise_contract(row: dict[str, Any]):
             "symbol_name",
         )
         or ""
-    )
+    ).strip()
+
+    instrument_type = str(
+        _field(
+            row,
+            "pInstType",
+            "instrument_type",
+            "instrumentType",
+            "inst_type",
+        )
+        or ""
+    ).upper().strip()
 
     return {
-        "instrument_token": str(token or ""),
+        "instrument_token": str(token or "").strip(),
         "symbol": symbol_name,
         "trading_symbol": trading_symbol,
-        "expiry": str(expiry or ""),
+        "expiry": str(expiry or "").strip(),
+        "expiry_date": _parse_expiry(expiry),
         "option_type": option_type,
         "strike_price": strike,
+        "instrument_type": instrument_type,
         "raw": row,
     }
 
 
-def _atm_candidates(rows, underlying_ltp: float, direction: str):
+def _is_exact_underlying(item, wanted_symbol: str):
+    """
+    Prevent broad search results such as NIFTYFPI from entering the option
+    selector. Prefer pSymbolName when Kotak supplies it; otherwise use a
+    conservative trading-symbol prefix check.
+    """
+    wanted = _clean_upper(wanted_symbol)
+    symbol_name = _clean_upper(item.get("symbol"))
+    trading_symbol = _clean_upper(item.get("trading_symbol"))
+
+    if symbol_name:
+        return symbol_name == wanted
+
+    if not trading_symbol.startswith(wanted):
+        return False
+
+    # The first character after the underlying should normally begin the
+    # expiry encoding, not another alphabetic product suffix such as FPI.
+    tail = trading_symbol[len(wanted):]
+    return bool(tail) and tail[0].isdigit()
+
+
+def _atm_candidates(
+    rows,
+    underlying_ltp: float,
+    direction: str,
+    wanted_symbol: str,
+):
     wanted_type = "CE" if direction == "CALL" else "PE"
+    today = datetime.now(timezone.utc).date()
 
     contracts = []
 
@@ -968,6 +1048,14 @@ def _atm_candidates(rows, underlying_ltp: float, direction: str):
             continue
 
         item = _normalise_contract(row)
+
+        if not _is_exact_underlying(item, wanted_symbol):
+            continue
+
+        # When Kotak supplies instrument type, require an index option.
+        inst = _clean_upper(item.get("instrument_type"))
+        if inst and inst not in {"OPTIDX", "IO"}:
+            continue
 
         if item["option_type"] != wanted_type:
             continue
@@ -978,12 +1066,26 @@ def _atm_candidates(rows, underlying_ltp: float, direction: str):
         if item["strike_price"] is None:
             continue
 
+        expiry_date = item.get("expiry_date")
+        if expiry_date is None or expiry_date < today:
+            continue
+
         contracts.append(item)
 
     if not contracts:
         return []
 
-    # Prefer contracts closest to spot. We do not guess an expiry date here.
+    # Critical V5.3 rule:
+    # 1) nearest valid future expiry
+    # 2) only that expiry
+    # 3) nearest strike to the live underlying
+    nearest_expiry = min(item["expiry_date"] for item in contracts)
+
+    contracts = [
+        item for item in contracts
+        if item["expiry_date"] == nearest_expiry
+    ]
+
     contracts.sort(
         key=lambda item: abs(
             float(item["strike_price"]) - float(underlying_ltp)
@@ -995,11 +1097,9 @@ def _atm_candidates(rows, underlying_ltp: float, direction: str):
 
 async def auto_discover_option(symbol: str, direction: str):
     """
-    Discover a real option contract from Kotak scrip search without
-    hard-coding expiry or strike.
-
-    We deliberately do not guess expiry. Search results are ranked by
-    strike distance to live underlying LTP, then real quote liquidity.
+    V5.3 automatic option discovery:
+    exact underlying -> index option -> CE/PE -> valid nearest expiry ->
+    nearest ATM strike -> real Kotak quote -> liquidity tie-break.
     """
     ltp = latest.get(symbol, {}).get("ltp")
 
@@ -1026,7 +1126,12 @@ async def auto_discover_option(symbol: str, direction: str):
         "",
     )
 
-    candidates = _atm_candidates(rows, float(ltp), direction)
+    candidates = _atm_candidates(
+        rows,
+        float(ltp),
+        direction,
+        search_symbol,
+    )
 
     if not candidates:
         return {
@@ -1038,15 +1143,24 @@ async def auto_discover_option(symbol: str, direction: str):
             "search_symbol": search_symbol,
             "search_rows": len(rows),
             "reason": (
-                "Kotak scrip search returned no usable CE/PE candidates "
-                "for automatic discovery."
+                "Kotak search returned rows, but no exact-underlying "
+                "index-option contract with a parseable current/future "
+                "expiry matched the requested CE/PE side."
             ),
         }
 
-    # Inspect only a small nearest-ATM set to keep REST load low.
+    nearest_expiry = candidates[0]["expiry"]
+
+    # Check a small ATM neighbourhood only; this avoids thousands of quote calls.
     inspected = []
 
-    for candidate in candidates[:6]:
+    for candidate in candidates[:8]:
+        public_candidate = {
+            k: v
+            for k, v in candidate.items()
+            if k not in {"raw", "expiry_date"}
+        }
+
         try:
             q = await inspect_option_contract(
                 candidate["instrument_token"],
@@ -1054,12 +1168,13 @@ async def auto_discover_option(symbol: str, direction: str):
             )
 
             inspected.append({
-                **candidate,
+                **public_candidate,
                 "quote": q,
             })
+
         except Exception as exc:
             inspected.append({
-                **candidate,
+                **public_candidate,
                 "quote_error": f"{type(exc).__name__}: {exc}",
             })
 
@@ -1068,6 +1183,7 @@ async def auto_discover_option(symbol: str, direction: str):
         for item in inspected
         if isinstance(item.get("quote"), dict)
         and item["quote"].get("ltp") is not None
+        and float(item["quote"]["ltp"]) > 0
     ]
 
     if not usable:
@@ -1079,11 +1195,15 @@ async def auto_discover_option(symbol: str, direction: str):
             "exchange_segment": exchange_segment,
             "search_symbol": search_symbol,
             "search_rows": len(rows),
+            "nearest_expiry": nearest_expiry,
+            "atm_candidates": len(candidates),
             "candidates_checked": inspected,
-            "reason": "Candidate contracts were found, but no usable live quote was returned.",
+            "reason": (
+                "Exact-underlying nearest-expiry candidates were found, "
+                "but Kotak Quotes returned no usable live option LTP."
+            ),
         }
 
-    # Nearest ATM is primary; liquidity breaks close ties.
     usable.sort(
         key=lambda item: (
             abs(float(item["strike_price"]) - float(ltp)),
@@ -1101,10 +1221,12 @@ async def auto_discover_option(symbol: str, direction: str):
         "exchange_segment": exchange_segment,
         "search_symbol": search_symbol,
         "search_rows": len(rows),
+        "nearest_expiry": nearest_expiry,
         "selected": selected,
         "candidates_checked": inspected,
         "source": "Kotak Neo Scrip Search + Quotes",
         "mock_data": False,
+        "selector_version": "5.3",
     }
 
 
