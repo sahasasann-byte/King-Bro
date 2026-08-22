@@ -458,6 +458,329 @@ function ScannerPanel({
 }
 
 
+function SignalCard({ symbol, signal }) {
+  const noSignal = !signal;
+
+  const direction = signal?.direction || "WAIT";
+  const grade = signal?.grade || "SCANNING";
+  const score = signal?.score ?? null;
+  const actionable = Boolean(signal?.actionable);
+
+  const isCall = direction === "CALL";
+  const isPut = direction === "PUT";
+
+  const accent =
+    isCall
+      ? "#69ffbf"
+      : isPut
+        ? "#ff7f92"
+        : "#8edfff";
+
+  const cardStyle = {
+    padding: "18px",
+    borderRadius: "20px",
+    border: `1px solid ${accent}33`,
+    background: "rgba(4, 22, 29, 0.34)",
+    backdropFilter: "blur(16px)",
+    boxShadow: `0 0 35px ${accent}10`,
+  };
+
+  const pillStyle = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "8px",
+    padding: "7px 11px",
+    borderRadius: "999px",
+    border: `1px solid ${accent}44`,
+    color: accent,
+    fontSize: "12px",
+    fontWeight: 900,
+    letterSpacing: "0.08em",
+  };
+
+  const row = {
+    display: "grid",
+    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+    gap: "10px",
+    marginTop: "14px",
+  };
+
+  const stat = {
+    padding: "11px",
+    borderRadius: "14px",
+    background: "rgba(255,255,255,0.035)",
+    border: "1px solid rgba(255,255,255,0.06)",
+  };
+
+  const small = {
+    fontSize: "10px",
+    opacity: 0.62,
+    letterSpacing: "0.08em",
+    marginBottom: "5px",
+  };
+
+  const value = {
+    fontSize: "14px",
+    fontWeight: 800,
+  };
+
+  const optionName =
+    signal?.option_contract?.display_symbol ||
+    "Waiting for option confirmation";
+
+  const reasons =
+    Array.isArray(signal?.reasons)
+      ? signal.reasons.slice(0, 6)
+      : [];
+
+  const blockers =
+    Array.isArray(signal?.blockers)
+      ? signal.blockers.slice(0, 4)
+      : [];
+
+  return (
+    <div style={cardStyle}>
+
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: "14px",
+        }}
+      >
+        <div>
+          <div
+            style={{
+              fontSize: "12px",
+              opacity: 0.65,
+              marginBottom: "5px",
+            }}
+          >
+            {symbol} SIGNAL
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "10px",
+              flexWrap: "wrap",
+            }}
+          >
+            <h3
+              style={{
+                margin: 0,
+                color: accent,
+                fontSize: "24px",
+              }}
+            >
+              {noSignal
+                ? "SCANNING"
+                : direction}
+            </h3>
+
+            <span style={pillStyle}>
+              {grade}
+            </span>
+          </div>
+        </div>
+
+        <div
+          style={{
+            textAlign: "right",
+          }}
+        >
+          <div
+            style={{
+              fontSize: "10px",
+              opacity: 0.62,
+              letterSpacing: "0.08em",
+            }}
+          >
+            SCORE
+          </div>
+
+          <div
+            style={{
+              color: accent,
+              fontSize: "26px",
+              fontWeight: 900,
+            }}
+          >
+            {score == null ? "—" : score}
+          </div>
+        </div>
+      </div>
+
+
+      <div
+        style={{
+          marginTop: "12px",
+          fontSize: "13px",
+          opacity: 0.82,
+        }}
+      >
+        {noSignal
+          ? "Waiting for enough completed candles and a valid setup."
+          : actionable
+            ? `Actionable setup • ${optionName}`
+            : `${optionName}`}
+      </div>
+
+
+      <div style={row}>
+
+        <div style={stat}>
+          <div style={small}>
+            OPTION LTP
+          </div>
+          <div style={value}>
+            {signal?.option_ltp == null
+              ? "—"
+              : `₹${formatNumber(signal.option_ltp)}`}
+          </div>
+        </div>
+
+        <div style={stat}>
+          <div style={small}>
+            ENTRY
+          </div>
+          <div style={value}>
+            {signal?.entry == null
+              ? "—"
+              : `₹${formatNumber(signal.entry)}`}
+          </div>
+        </div>
+
+        <div style={stat}>
+          <div style={small}>
+            STOP LOSS
+          </div>
+          <div style={value}>
+            {signal?.stop_loss == null
+              ? "—"
+              : `₹${formatNumber(signal.stop_loss)}`}
+          </div>
+        </div>
+
+        <div style={stat}>
+          <div style={small}>
+            T1 / T2
+          </div>
+          <div style={value}>
+            {signal?.target_1 == null
+              ? "—"
+              : `₹${formatNumber(signal.target_1)} / ₹${formatNumber(signal.target_2)}`}
+          </div>
+        </div>
+
+      </div>
+
+
+      <div
+        style={{
+          marginTop: "14px",
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: "12px",
+        }}
+      >
+
+        <div
+          style={{
+            padding: "12px",
+            borderRadius: "14px",
+            background: "rgba(0,255,190,0.035)",
+          }}
+        >
+          <div
+            style={{
+              fontSize: "10px",
+              opacity: 0.62,
+              marginBottom: "7px",
+              letterSpacing: "0.08em",
+            }}
+          >
+            CONFIRMATIONS
+          </div>
+
+          {reasons.length ? (
+            reasons.map((reason, index) => (
+              <div
+                key={index}
+                style={{
+                  fontSize: "12px",
+                  lineHeight: 1.6,
+                  color: "#bfffe8",
+                }}
+              >
+                ✓ {reason}
+              </div>
+            ))
+          ) : (
+            <div
+              style={{
+                fontSize: "12px",
+                opacity: 0.65,
+              }}
+            >
+              Waiting for confirmations...
+            </div>
+          )}
+        </div>
+
+
+        <div
+          style={{
+            padding: "12px",
+            borderRadius: "14px",
+            background: "rgba(255,90,120,0.035)",
+          }}
+        >
+          <div
+            style={{
+              fontSize: "10px",
+              opacity: 0.62,
+              marginBottom: "7px",
+              letterSpacing: "0.08em",
+            }}
+          >
+            BLOCKERS
+          </div>
+
+          {blockers.length ? (
+            blockers.map((blocker, index) => (
+              <div
+                key={index}
+                style={{
+                  fontSize: "12px",
+                  lineHeight: 1.6,
+                  color: "#ffc2cc",
+                }}
+              >
+                • {blocker}
+              </div>
+            ))
+          ) : (
+            <div
+              style={{
+                fontSize: "12px",
+                color: "#bfffe8",
+              }}
+            >
+              No active blocker
+            </div>
+          )}
+        </div>
+
+      </div>
+
+    </div>
+  );
+}
+
+
 function App() {
 
   const [feed, setFeed] =
@@ -505,6 +828,13 @@ function App() {
   ] = React.useState("");
 
 
+  const [signals, setSignals] =
+    React.useState({
+      "NIFTY 50": null,
+      "SENSEX": null,
+    });
+
+
   const loadScanners =
     React.useCallback(
       async () => {
@@ -535,11 +865,61 @@ function App() {
     );
 
 
+
+  const loadSignals =
+    React.useCallback(
+      async () => {
+
+        try {
+
+          const response =
+            await fetch(
+              API +
+                "/api/signals"
+            );
+
+          if (!response.ok) {
+            return;
+          }
+
+          const data =
+            await response.json();
+
+          const backendSignals =
+            data?.signals || {};
+
+          setSignals({
+            "NIFTY 50":
+              backendSignals["NIFTY 50"] || null,
+
+            "SENSEX":
+              backendSignals["SENSEX"] || null,
+          });
+
+        } catch (_) {
+          // Signal cards continue showing last known data.
+        }
+
+      },
+      []
+    );
+
+
   React.useEffect(() => {
 
     loadScanners();
+    loadSignals();
 
-  }, [loadScanners]);
+    const timer =
+      setInterval(
+        loadSignals,
+        15000
+      );
+
+    return () =>
+      clearInterval(timer);
+
+  }, [loadScanners, loadSignals]);
 
 
   React.useEffect(() => {
@@ -712,6 +1092,38 @@ function App() {
                   ...prev,
                   [item.key]:
                     item,
+                })
+              );
+
+            }
+
+          }
+
+
+          if (
+            msg.type === "signal_update" ||
+            msg.type === "signal_event"
+          ) {
+
+            const signal =
+              msg.data;
+
+            if (
+              signal?.symbol &&
+              Object.prototype.hasOwnProperty.call(
+                {
+                  "NIFTY 50": true,
+                  "SENSEX": true,
+                },
+                signal.symbol
+              )
+            ) {
+
+              setSignals(
+                (prev) => ({
+                  ...prev,
+                  [signal.symbol]:
+                    signal,
                 })
               );
 
@@ -1391,6 +1803,63 @@ function App() {
             )
           }
         />
+
+
+
+        <section
+          className="overview glass"
+          style={{
+            marginTop: "18px",
+            padding: "18px",
+          }}
+        >
+
+          <div className="overview-head">
+
+            <div>
+              <h3>
+                Live Index Signals
+              </h3>
+
+              <small className="green">
+                ● WebSocket live signal updates
+              </small>
+            </div>
+
+            <div className="live-badge">
+              <Zap />
+              SIGNALS
+            </div>
+
+          </div>
+
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns:
+                "repeat(auto-fit, minmax(320px, 1fr))",
+              gap: "14px",
+            }}
+          >
+
+            <SignalCard
+              symbol="NIFTY 50"
+              signal={
+                signals["NIFTY 50"]
+              }
+            />
+
+            <SignalCard
+              symbol="SENSEX"
+              signal={
+                signals["SENSEX"]
+              }
+            />
+
+          </div>
+
+        </section>
 
 
         <section
