@@ -117,7 +117,7 @@ function MarketCard({ item }) {
         }
       >
         {change == null
-          ? "Waiting for Kotak live tick"
+          ? "Waiting for live tick"
 
           : `${
               isDown
@@ -191,19 +191,19 @@ function ScannerPanel({
     );
 
   const panelStyle = {
-    marginTop: "18px",
-    padding: "18px",
+    marginTop: "10px",
+    padding: "7px 11px",
   };
 
   const gridStyle = {
     display: "grid",
     gridTemplateColumns:
-      "repeat(auto-fit, minmax(260px, 1fr))",
+      "repeat(2, minmax(220px, 1fr))",
     gap: "14px",
   };
 
   const cardStyle = {
-    padding: "16px",
+    padding: "10px 12px",
     borderRadius: "18px",
     border:
       "1px solid rgba(120,255,220,0.12)",
@@ -217,7 +217,7 @@ function ScannerPanel({
     alignItems: "center",
     justifyContent: "space-between",
     gap: "12px",
-    marginBottom: "12px",
+    marginBottom: "6px",
   };
 
   const statusStyle = (active) => ({
@@ -232,7 +232,7 @@ function ScannerPanel({
   const btnRow = {
     display: "flex",
     gap: "10px",
-    marginTop: "14px",
+    marginTop: "7px",
     flexWrap: "wrap",
   };
 
@@ -256,26 +256,6 @@ function ScannerPanel({
       style={panelStyle}
     >
 
-      <div className="overview-head">
-
-        <div>
-          <h3>
-            Signal Scanner Control
-          </h3>
-
-          <small className="green">
-            ● V7 backend scanner controls
-          </small>
-        </div>
-
-        <div className="live-badge">
-          <ScanLine />
-          SCANNER
-        </div>
-
-      </div>
-
-
       <div style={gridStyle}>
 
         <div style={cardStyle}>
@@ -287,15 +267,7 @@ function ScannerPanel({
                 INDEX SIG
               </b>
 
-              <div
-                style={{
-                  marginTop: "4px",
-                  fontSize: "12px",
-                  opacity: 0.7,
-                }}
-              >
-                NIFTY 50 + SENSEX
-              </div>
+
             </div>
 
             <span
@@ -311,16 +283,7 @@ function ScannerPanel({
           </div>
 
 
-          <div
-            style={{
-              fontSize: "12px",
-              lineHeight: 1.6,
-              opacity: 0.78,
-            }}
-          >
-            1M + 5M + 15M signal
-            engine with option confirmation.
-          </div>
+
 
 
           <div style={btnRow}>
@@ -371,15 +334,7 @@ function ScannerPanel({
                 STOCK SIG
               </b>
 
-              <div
-                style={{
-                  marginTop: "4px",
-                  fontSize: "12px",
-                  opacity: 0.7,
-                }}
-              >
-                Midcap + Smallcap universe
-              </div>
+
             </div>
 
             <span
@@ -399,18 +354,7 @@ function ScannerPanel({
           </div>
 
 
-          <div
-            style={{
-              fontSize: "12px",
-              lineHeight: 1.6,
-              opacity: 0.78,
-            }}
-          >
-            Control is ready.
-            Actual stock universe feed
-            will be wired in the next
-            backend module.
-          </div>
+
 
 
           <div style={btnRow}>
@@ -1019,7 +963,7 @@ function App() {
               setLoginError("");
 
               setMessage(
-                "Kotak live feed connected."
+                "Live feed connected."
               );
 
             }
@@ -1230,7 +1174,7 @@ function App() {
     setLoginError("");
 
     setMessage(
-      "Authenticating with Kotak Neo..."
+      "Connecting..."
     );
 
 
@@ -1276,7 +1220,7 @@ function App() {
           data?.detail;
 
         let errorMessage =
-          "Kotak authentication failed.";
+          "Authentication failed.";
 
 
         if (
@@ -1312,7 +1256,7 @@ function App() {
       setLoginError("");
 
       setMessage(
-        "Kotak authenticated. Starting live feed..."
+        "Authenticated. Starting live feed..."
       );
 
 
@@ -1337,7 +1281,7 @@ function App() {
       const errorText =
         error?.message ||
         String(error) ||
-        "Kotak connection failed.";
+        "Connection failed.";
 
 
       setLoginError(
@@ -1540,12 +1484,12 @@ function App() {
 
 
             <small>
-              Kotak Neo SFeed
+              LIVE FEED
             </small>
 
 
             <small>
-              No mock data
+              REAL DATA
             </small>
 
           </div>
@@ -1571,11 +1515,7 @@ function App() {
 
 
             <p>
-              Real Market Data
-              {" • "}
-              Kotak Neo
-              {" • "}
-              No Mock Prices
+              The Raaja Bro!!
             </p>
 
           </div>
@@ -1612,34 +1552,7 @@ function App() {
               {connectKotak}
           >
 
-            <div className="login-copy">
-
-              <LockKeyhole />
-
-
-              <div>
-
-                <h3>
-                  Morning Kotak Login
-                </h3>
-
-
-                <p>
-                  Consumer Key,
-                  Mobile, UCC and MPIN
-                  are already stored
-                  on the backend.
-                </p>
-
-              </div>
-
-            </div>
-
-
             <label>
-
-              CURRENT 6-DIGIT TOTP
-
 
               <input
                 type="text"
@@ -1690,7 +1603,7 @@ function App() {
                   }
                 }
 
-                placeholder="123456"
+                placeholder="TOTP"
 
                 autoFocus
               />
@@ -1709,7 +1622,7 @@ function App() {
 
               {busy
                 ? "CONNECTING..."
-                : "CONNECT LIVE DATA"
+                : "CONNECT"
               }
 
             </button>
@@ -1809,8 +1722,8 @@ function App() {
         <section
           className="overview glass"
           style={{
-            marginTop: "18px",
-            padding: "18px",
+            marginTop: "10px",
+            padding: "12px 14px",
           }}
         >
 
@@ -1856,105 +1769,6 @@ function App() {
                 signals["SENSEX"]
               }
             />
-
-          </div>
-
-        </section>
-
-
-        <section
-          className=
-            "overview glass"
-        >
-
-
-          <div
-            className=
-              "overview-head"
-          >
-
-            <div>
-
-              <h3>
-                Live Market Monitor
-              </h3>
-
-
-              <small
-                className={
-                  status.feed_connected
-                    ? "green"
-                    : "red"
-                }
-              >
-
-                ●{" "}
-
-
-                {status.feed_connected
-                  ? "Kotak live feed connected"
-                  : "Waiting for live feed"
-                }
-
-              </small>
-
-            </div>
-
-
-            <div className="live-badge">
-
-              <Radio />
-
-              REAL-TIME
-
-            </div>
-
-          </div>
-
-
-          <div className="monitor">
-
-
-            <div className="monitor-orb">
-              <Activity />
-            </div>
-
-
-            {status.feed_connected
-              ? (
-                <>
-
-                  <b>
-                    Real-time ticks are arriving from Kotak Neo.
-                  </b>
-
-
-                  <span>
-                    NIFTY 50
-                    {" • "}
-                    SENSEX
-                    {" • "}
-                    BANK NIFTY
-                  </span>
-
-                </>
-              )
-
-              : (
-                <>
-
-                  <b>
-                    No live market tick received.
-                  </b>
-
-
-                  <span>
-                    Enter the current TOTP above to start the Kotak session.
-                  </span>
-
-                </>
-              )
-            }
 
           </div>
 
