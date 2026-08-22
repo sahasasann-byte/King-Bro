@@ -7,14 +7,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from neo_api_client import NeoAPI
-from neo_api_client.websocket.feed import WsToken, SFeedScrip
+from neo_api_client.websocket.feed import (
+    WsToken,
+    SFeedIndex,
+)
 
 from config import settings
 
 
+# =========================================================
+# APP
+# =========================================================
+
 app = FastAPI(
     title="King Bro Terminal API",
-    version="4.1.0",
+    version="4.2.0",
 )
 
 
@@ -27,13 +34,17 @@ app.add_middleware(
 )
 
 
+# =========================================================
+# REQUEST MODELS
+# =========================================================
+
 class TotpRequest(BaseModel):
     totp: str = Field(min_length=6, max_length=6)
 
 
-# ---------------------------------------------------------
+# =========================================================
 # GLOBAL STATE
-# ---------------------------------------------------------
+# =========================================================
 
 browser_clients: set[WebSocket] = set()
 
@@ -51,20 +62,20 @@ neo_client: Optional[NeoAPI] = None
 feed_task: Optional[asyncio.Task] = None
 
 
-# ---------------------------------------------------------
+# =========================================================
 # HELPERS
-# ---------------------------------------------------------
+# =========================================================
 
 async def broadcast(payload: dict):
-    dead = []
+    dead_clients = []
 
     for ws in list(browser_clients):
         try:
             await ws.send_json(payload)
         except Exception:
-            dead.append(ws)
+            dead_clients.append(ws)
 
-    for ws in dead:
+    for ws in dead_clients:
         browser_clients.discard(ws)
 
 
@@ -90,34 +101,7 @@ def number(value):
         return None
 
 
-def canonical_symbol(symbol: str):
-    s = (symbol or "").strip().lower()
-
-    if "sensex" in s:
-        return "SENSEX"
-
-    if (
-        "nifty bank" in s
-        or "bank nifty" in s
-        or "banknifty" in s
-    ):
-        return "BANK NIFTY"
-
-    if (
-        "nifty 50" in s
-        or s == "nifty"
-    ):
-        return "NIFTY 50"
-
-    return symbol or "UNKNOWN"
-
-
 def response_has_error(response):
-    """
-    Kotak SDK may return a dict containing an API error
-    instead of raising a Python exception.
-    """
-
     if response is None:
         return True
 
@@ -127,7 +111,12 @@ def response_has_error(response):
     if response.get("error") is True:
         return True
 
-    if str(response.get("status", "")).lower() in {
+    if str(
+        response.get(
+            "status",
+            ""
+        )
+    ).lower() in {
         "error",
         "failed",
         "failure",
@@ -137,8 +126,12 @@ def response_has_error(response):
     data = response.get("data")
 
     if isinstance(data, dict):
+
         if str(
-            data.get("status", "")
+            data.get(
+                "status",
+                ""
+            )
         ).lower() in {
             "error",
             "failed",
@@ -146,7 +139,6 @@ def response_has_error(response):
         }:
             return True
 
-    # Error-style payload with message and no session data
     if (
         response.get("message")
         and not response.get("data")
@@ -157,18 +149,13 @@ def response_has_error(response):
 
 
 def safe_api_message(response):
-    """
-    Return only useful error information.
-    Do not expose tokens/session secrets to browser.
-    """
-
     if not isinstance(response, dict):
         return str(response)
 
     message = (
         response.get("message")
-        or response.get("error")
         or response.get("status")
+        or response.get("error")
     )
 
     data = response.get("data")
@@ -181,22 +168,41 @@ def safe_api_message(response):
         )
 
     return str(
-        message or "Unknown Kotak API error"
+        message
+        or "Unknown Kotak API error"
     )
 
 
-# ---------------------------------------------------------
+def canonical_index_name(
+    instrument_token: str,
+    trading_symbol: str,
+):
+    combined = (
+        f"{instrument_token} "
+        f"{trading_symbol}"
+    ).strip().lower()
+
+    if "sensex" in combined:
+        return "SENSEX"
+
+    if (
+        "nifty bank" in combined
+        or "bank nifty" in combined
+        or "banknifty" in combined
+    ):
+        return "BANK NIFTY"
+
+    if "nifty 50" in combined:
+        return "NIFTY 50"
+
+    return None
+
+
+# =========================================================
 # AUTHENTICATION
-# ---------------------------------------------------------
+# =========================================================
 
 def authenticate_sync(totp: str):
-    """
-    Official Kotak flow:
-    1. NeoAPI(consumer_key)
-    2. totp_login()
-    3. totp_validate()
-    """
-
     required = {
         "KOTAK_CONSUMER_KEY":
             settings.KOTAK_CONSUMER_KEY,
@@ -233,7 +239,10 @@ def authenticate_sync(totp: str):
     )
 
 
+    # -----------------------------------------------------
     # STEP 1 — TOTP LOGIN
+    # -----------------------------------------------------
+
     login_response = client.totp_login(
         mobile_number=
             settings.KOTAK_MOBILE_NUMBER,
@@ -257,7 +266,10 @@ def authenticate_sync(totp: str):
         )
 
 
-    # STEP 2 — MPIN VALIDATION
+    # -----------------------------------------------------
+    # STEP 2 — MPIN VALIDATE
+    # -----------------------------------------------------
+
     validate_response = (
         client.totp_validate(
             mpin=
@@ -280,9 +292,9 @@ def authenticate_sync(totp: str):
     return client
 
 
-# ---------------------------------------------------------
-# KOTAK LIVE FEED
-# ---------------------------------------------------------
+# =========================================================
+# KOTAK INDEX LIVE FEED
+# =========================================================
 
 async def feed_loop():
     global neo_client
@@ -298,7 +310,11 @@ async def feed_loop():
                 .create_websocket()
             ) as ws:
 
-                await ws.subscribe_scrips([
+                # -----------------------------------------
+                # SUBSCRIBE INDEX FEED
+                # -----------------------------------------
+
+                await ws.subscribe_index([
                     WsToken(
                         "nse_cm",
                         "Nifty 50",
@@ -322,47 +338,110 @@ async def feed_loop():
                 )
 
 
+                # -----------------------------------------
+                # RECEIVE INDEX TICKS
+                # -----------------------------------------
+
                 async for message in ws:
 
                     if not isinstance(
                         message,
-                        SFeedScrip,
+                        SFeedIndex
                     ):
                         continue
 
 
-                    symbol = (
-                        getattr(
-                            message,
+                    # -------------------------------------
+                    # Convert Pydantic model -> dict
+                    # -------------------------------------
+
+                    try:
+                        data = message.model_dump()
+                    except Exception:
+                        data = {}
+
+
+                    instrument_token = str(
+                        data.get(
+                            "instrument_token",
+                            ""
+                        )
+                        or ""
+                    )
+
+
+                    trading_symbol = str(
+                        data.get(
                             "trading_symbol",
-                            None,
+                            ""
                         )
-                        or getattr(
-                            message,
+                        or data.get(
                             "display_symbol",
-                            None,
+                            ""
                         )
-                        or str(
-                            getattr(
-                                message,
-                                "instrument_token",
-                                "",
-                            )
+                        or data.get(
+                            "index_name",
+                            ""
                         )
+                        or ""
                     )
 
 
-                    key = canonical_symbol(
-                        symbol
+                    key = canonical_index_name(
+                        instrument_token,
+                        trading_symbol,
                     )
 
 
-                    if key not in (
-                        "NIFTY 50",
-                        "SENSEX",
-                        "BANK NIFTY",
-                    ):
+                    if key is None:
                         continue
+
+
+                    # -------------------------------------
+                    # LTP
+                    # -------------------------------------
+
+                    ltp = (
+                        data.get(
+                            "last_traded_price"
+                        )
+                        or data.get("ltp")
+                        or data.get(
+                            "index_value"
+                        )
+                        or data.get(
+                            "last_price"
+                        )
+                    )
+
+
+                    # -------------------------------------
+                    # CHANGE
+                    # -------------------------------------
+
+                    change = (
+                        data.get("change")
+                        or data.get(
+                            "net_change"
+                        )
+                    )
+
+
+                    # -------------------------------------
+                    # PERCENT CHANGE
+                    # -------------------------------------
+
+                    percent_change = (
+                        data.get(
+                            "percentage_change"
+                        )
+                        or data.get(
+                            "percent_change"
+                        )
+                        or data.get(
+                            "per_change"
+                        )
+                    )
 
 
                     now = (
@@ -375,46 +454,33 @@ async def feed_loop():
 
 
                     item = {
-                        "key": key,
+                        "key":
+                            key,
 
-                        "symbol": symbol,
+                        "symbol":
+                            trading_symbol
+                            or instrument_token,
 
-                        "ltp": number(
-                            getattr(
-                                message,
-                                "last_traded_price",
-                                None,
-                            )
-                        ),
+                        "instrument_token":
+                            instrument_token,
 
-                        "change": number(
-                            getattr(
-                                message,
-                                "change",
-                                None,
-                            )
-                        ),
+                        "ltp":
+                            number(
+                                ltp
+                            ),
+
+                        "change":
+                            number(
+                                change
+                            ),
 
                         "percent_change":
                             number(
-                                getattr(
-                                    message,
-                                    "percentage_change",
-                                    None,
-                                )
-                                or getattr(
-                                    message,
-                                    "percent_change",
-                                    None,
-                                )
-                                or getattr(
-                                    message,
-                                    "per_change",
-                                    None,
-                                )
+                                percent_change
                             ),
 
-                        "received_at": now,
+                        "received_at":
+                            now,
                     }
 
 
@@ -427,12 +493,15 @@ async def feed_loop():
 
 
                     await broadcast({
-                        "type": "tick",
-                        "data": item,
+                        "type":
+                            "tick",
+
+                        "data":
+                            item,
                     })
 
 
-                backoff = 2
+            backoff = 2
 
 
         except asyncio.CancelledError:
@@ -454,15 +523,16 @@ async def feed_loop():
                 backoff
             )
 
+
             backoff = min(
                 backoff * 2,
                 30,
             )
 
 
-# ---------------------------------------------------------
-# API ROUTES
-# ---------------------------------------------------------
+# =========================================================
+# ROOT
+# =========================================================
 
 @app.get("/")
 async def root():
@@ -473,13 +543,21 @@ async def root():
         "status":
             "online",
 
+        "data_source":
+            "Kotak Neo Index Feed",
+
         "mock_data":
             False,
     }
 
 
+# =========================================================
+# HEALTH
+# =========================================================
+
 @app.get("/health")
 async def health():
+
     return {
         "status":
             "ok",
@@ -487,6 +565,7 @@ async def health():
         **status,
 
         "configured": {
+
             "consumer_key":
                 bool(
                     settings
@@ -514,6 +593,10 @@ async def health():
     }
 
 
+# =========================================================
+# CONNECT KOTAK
+# =========================================================
+
 @app.post(
     "/api/kotak/connect"
 )
@@ -524,12 +607,14 @@ async def connect_kotak(
     global feed_task
 
 
-    # TOTP must be exactly six digits
     if not body.totp.isdigit():
         raise HTTPException(
             status_code=400,
-            detail=
-                "TOTP must contain only digits.",
+
+            detail={
+                "message":
+                    "TOTP must contain only digits."
+            },
         )
 
 
@@ -555,13 +640,20 @@ async def connect_kotak(
         )
 
 
-        # Stop previous feed task
+        # -----------------------------------------
+        # Stop previous feed if one exists
+        # -----------------------------------------
+
         if (
             feed_task
             and not feed_task.done()
         ):
             feed_task.cancel()
 
+
+        # -----------------------------------------
+        # Start fresh index feed
+        # -----------------------------------------
 
         feed_task = (
             asyncio.create_task(
@@ -571,11 +663,12 @@ async def connect_kotak(
 
 
         return {
-            "ok": True,
+            "ok":
+                True,
 
             "message":
                 "Kotak authenticated. "
-                "Live feed starting.",
+                "Index live feed starting.",
         }
 
 
@@ -607,6 +700,10 @@ async def connect_kotak(
         )
 
 
+# =========================================================
+# SNAPSHOT
+# =========================================================
+
 @app.get(
     "/api/market/snapshot"
 )
@@ -623,9 +720,9 @@ async def market_snapshot():
     }
 
 
-# ---------------------------------------------------------
+# =========================================================
 # BROWSER WEBSOCKET
-# ---------------------------------------------------------
+# =========================================================
 
 @app.websocket(
     "/ws/market"
@@ -636,10 +733,15 @@ async def browser_market_ws(
 
     await websocket.accept()
 
+
     browser_clients.add(
         websocket
     )
 
+
+    # -----------------------------------------
+    # Send current connection status
+    # -----------------------------------------
 
     await websocket.send_json({
         "type":
@@ -649,6 +751,10 @@ async def browser_market_ws(
             status,
     })
 
+
+    # -----------------------------------------
+    # Send latest existing ticks
+    # -----------------------------------------
 
     if latest:
 
@@ -666,6 +772,7 @@ async def browser_market_ws(
     try:
 
         while True:
+
             await websocket.receive_text()
 
 
