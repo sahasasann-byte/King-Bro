@@ -23,7 +23,7 @@ from config import settings
 
 app = FastAPI(
     title="King Bro Terminal API",
-    version="5.3.0",
+    version="5.4.0",
 )
 
 
@@ -847,8 +847,22 @@ def _quotes_sync(
     rows = _normalise_rows(response)
 
     if not rows:
+        if isinstance(response, dict):
+            message = (
+                response.get("message")
+                or response.get("emsg")
+                or response.get("error")
+                or response.get("status")
+            )
+            raise RuntimeError(
+                "Kotak Quotes returned no instrument data"
+                + (f": {message}" if message else "")
+                + f". Raw response keys={list(response.keys())}"
+            )
+
         raise RuntimeError(
-            "Kotak Quotes returned no instrument data."
+            f"Kotak Quotes returned no instrument data. "
+            f"Raw response type={type(response).__name__}"
         )
 
     return rows[0]
@@ -930,17 +944,26 @@ def _parse_expiry(value):
     return None
 
 
-def _normalise_contract(row: dict[str, Any]):
-    strike = number(
-        _field(
-            row,
-            "dStrikePrice;",
-            "dStrikePrice",
-            "strike_price",
-            "strikePrice",
-        )
-    )
+def _strike_from_trading_symbol(trading_symbol: str):
+    """
+    Kotak scrip-search can expose dStrikePrice in scaled integer units
+    (for example 1785000 while the trading symbol says 17850CE).
+    The trading symbol is therefore the safest display-strike source.
+    """
+    ts = str(trading_symbol or "").upper().strip()
 
+    match = re.search(r"(\\d+(?:\\.\\d+)?)(CE|PE)$", ts)
+
+    if not match:
+        return None
+
+    try:
+        return float(match.group(1))
+    except Exception:
+        return None
+
+
+def _normalise_contract(row: dict[str, Any]):
     token = _field(
         row,
         "pSymbol",
@@ -997,6 +1020,28 @@ def _normalise_contract(row: dict[str, Any]):
         or ""
     ).upper().strip()
 
+    raw_strike = number(
+        _field(
+            row,
+            "dStrikePrice;",
+            "dStrikePrice",
+            "strike_price",
+            "strikePrice",
+        )
+    )
+
+    parsed_strike = _strike_from_trading_symbol(
+        trading_symbol
+    )
+
+    # Prefer the human-readable strike encoded in the official trading symbol.
+    # Preserve raw_strike separately for debugging.
+    strike = (
+        parsed_strike
+        if parsed_strike is not None
+        else raw_strike
+    )
+
     return {
         "instrument_token": str(token or "").strip(),
         "symbol": symbol_name,
@@ -1005,6 +1050,7 @@ def _normalise_contract(row: dict[str, Any]):
         "expiry_date": _parse_expiry(expiry),
         "option_type": option_type,
         "strike_price": strike,
+        "raw_strike_price": raw_strike,
         "instrument_type": instrument_type,
         "raw": row,
     }
