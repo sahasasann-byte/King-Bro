@@ -23,7 +23,7 @@ from config import settings
 
 app = FastAPI(
     title="King Bro Terminal API",
-    version="5.4.0",
+    version="5.5.0",
 )
 
 
@@ -827,12 +827,18 @@ def _quotes_sync(
     instrument_token: str,
     exchange_segment: str,
 ):
-    client = NeoAPI(
-        consumer_key=settings.KOTAK_CONSUMER_KEY,
-        environment=settings.KOTAK_ENVIRONMENT,
-    )
+    # IMPORTANT:
+    # Quotes is a post-login API in the Kotak SDK. A fresh NeoAPI()
+    # object does not carry the session/baseUrl returned by MPIN validate.
+    # Reuse the authenticated global client created by /api/kotak/connect.
+    global neo_client
 
-    response = client.quotes(
+    if neo_client is None:
+        raise RuntimeError(
+            "Kotak is not authenticated. Connect with TOTP first."
+        )
+
+    response = neo_client.quotes(
         instrument_tokens=[
             {
                 "instrument_token":
@@ -875,10 +881,16 @@ def _search_option_sync(
     option_type: str = "",
     strike_price: str = "",
 ):
-    client = NeoAPI(
-        consumer_key=settings.KOTAK_CONSUMER_KEY,
-        environment=settings.KOTAK_ENVIRONMENT,
-    )
+    # Prefer the authenticated session so post-login baseUrl/session
+    # information is preserved consistently.
+    global neo_client
+
+    client = neo_client
+
+    if client is None:
+        raise RuntimeError(
+            "Kotak is not authenticated. Connect with TOTP first."
+        )
 
     # Kotak search_scrip documents exchange_segment as mandatory and
     # symbol/expiry/option_type/strike_price as optional filters.
@@ -952,7 +964,7 @@ def _strike_from_trading_symbol(trading_symbol: str):
     """
     ts = str(trading_symbol or "").upper().strip()
 
-    match = re.search(r"(\\d+(?:\\.\\d+)?)(CE|PE)$", ts)
+    match = re.search(r"(\d+(?:\.\d+)?)(CE|PE)$", ts)
 
     if not match:
         return None
