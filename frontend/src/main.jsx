@@ -421,8 +421,8 @@ function SignalCard({ symbol, signal }) {
         : "#8edfff";
 
   const cardStyle = {
-    padding: "18px",
-    borderRadius: "20px",
+    padding: "12px",
+    borderRadius: "16px",
     border: `1px solid ${accent}33`,
     background: "rgba(4, 22, 29, 0.34)",
     backdropFilter: "blur(16px)",
@@ -516,7 +516,7 @@ function SignalCard({ symbol, signal }) {
               style={{
                 margin: 0,
                 color: accent,
-                fontSize: "24px",
+                fontSize: "19px",
               }}
             >
               {noSignal
@@ -548,7 +548,7 @@ function SignalCard({ symbol, signal }) {
           <div
             style={{
               color: accent,
-              fontSize: "26px",
+              fontSize: "20px",
               fontWeight: 900,
             }}
           >
@@ -725,6 +725,199 @@ function SignalCard({ symbol, signal }) {
 }
 
 
+function StockSignalsPanel({
+  items,
+  scanners,
+  error
+}) {
+  const running =
+    Boolean(
+      scanners?.stocks?.running
+    );
+
+  const resolved =
+    scanners?.stocks?.resolved ?? 0;
+
+  const universeCount =
+    scanners?.stocks?.universe_count ?? 40;
+
+  const actionable =
+    items.filter(
+      (item) =>
+        item?.actionable
+    );
+
+  const visible =
+    actionable.length
+      ? actionable
+      : items.slice(0, 6);
+
+  return (
+    <section
+      className="overview glass"
+      style={{
+        marginTop: "7px",
+        padding: "9px 11px",
+      }}
+    >
+      <div className="overview-head">
+
+        <div>
+          <h3>
+            Stock Signals
+          </h3>
+
+          <small
+            className={
+              running
+                ? "green"
+                : "red"
+            }
+          >
+            ●{" "}
+            {running
+              ? `LIVE • ${resolved}/${universeCount} stocks`
+              : "Scanner stopped"}
+          </small>
+        </div>
+
+        <div className="live-badge">
+          <Zap />
+          TOP SETUPS
+        </div>
+
+      </div>
+
+      {error ? (
+        <div
+          style={{
+            padding: "12px",
+            color: "#ff9aaa",
+            fontSize: "12px",
+          }}
+        >
+          {error}
+        </div>
+      ) : visible.length === 0 ? (
+        <div
+          style={{
+            padding: "16px",
+            textAlign: "center",
+            opacity: 0.7,
+            fontSize: "13px",
+          }}
+        >
+          {running
+            ? "Scanning fixed stock universe • waiting for completed candles..."
+            : "Start STOCK SIG to scan the fixed stock universe."}
+        </div>
+      ) : (
+        <div
+          style={{
+            display: "grid",
+            gap: "8px",
+          }}
+        >
+          {visible.map(
+            (item) => {
+
+              const buy =
+                item.direction === "BUY";
+
+              const accent =
+                buy
+                  ? "#69ffbf"
+                  : "#ff7f92";
+
+              return (
+                <div
+                  key={item.symbol}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns:
+                      "1.15fr .75fr .65fr .75fr repeat(4, 1fr)",
+                    gap: "8px",
+                    alignItems: "center",
+                    padding: "9px 11px",
+                    borderRadius: "13px",
+                    background:
+                      "rgba(255,255,255,0.03)",
+                    border:
+                      `1px solid ${accent}22`,
+                    fontSize: "12px",
+                  }}
+                >
+                  <b>
+                    {item.symbol}
+                  </b>
+
+                  <b
+                    style={{
+                      color: accent,
+                    }}
+                  >
+                    {item.direction ||
+                      "WAIT"}
+                  </b>
+
+                  <span>
+                    {item.grade ||
+                      "—"}
+                  </span>
+
+                  <span>
+                    Score{" "}
+                    <b>
+                      {item.score ?? "—"}
+                    </b>
+                  </span>
+
+                  <span>
+                    LTP{" "}
+                    <b>
+                      {item.ltp == null
+                        ? "—"
+                        : `₹${formatNumber(item.ltp)}`}
+                    </b>
+                  </span>
+
+                  <span>
+                    Entry{" "}
+                    <b>
+                      {item.entry == null
+                        ? "—"
+                        : `₹${formatNumber(item.entry)}`}
+                    </b>
+                  </span>
+
+                  <span>
+                    SL{" "}
+                    <b>
+                      {item.stop_loss == null
+                        ? "—"
+                        : `₹${formatNumber(item.stop_loss)}`}
+                    </b>
+                  </span>
+
+                  <span>
+                    T1/T2{" "}
+                    <b>
+                      {item.target_1 == null
+                        ? "—"
+                        : `₹${formatNumber(item.target_1)} / ₹${formatNumber(item.target_2)}`}
+                    </b>
+                  </span>
+                </div>
+              );
+            }
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+
 function App() {
 
   const [feed, setFeed] =
@@ -779,6 +972,13 @@ function App() {
     });
 
 
+  const [stockSignals, setStockSignals] =
+    React.useState([]);
+
+  const [stockSignalError, setStockSignalError] =
+    React.useState("");
+
+
   const loadScanners =
     React.useCallback(
       async () => {
@@ -788,7 +988,7 @@ function App() {
           const response =
             await fetch(
               API +
-                "/api/scanners"
+                "/api/scanners/status"
             );
 
           if (!response.ok) {
@@ -849,21 +1049,85 @@ function App() {
     );
 
 
+
+  const loadStockSignals =
+    React.useCallback(
+      async () => {
+
+        try {
+
+          const response =
+            await fetch(
+              API +
+                "/api/stocks/signals/best?limit=8"
+            );
+
+          if (!response.ok) {
+            throw new Error(
+              `HTTP ${response.status}`
+            );
+          }
+
+          const data =
+            await response.json();
+
+          setStockSignals(
+            Array.isArray(data?.items)
+              ? data.items
+              : []
+          );
+
+          setStockSignalError("");
+
+        } catch (error) {
+
+          setStockSignalError(
+            error?.message ||
+            "Stock signal fetch failed."
+          );
+
+        }
+
+      },
+      []
+    );
+
+
   React.useEffect(() => {
 
     loadScanners();
     loadSignals();
+    loadStockSignals();
 
-    const timer =
+    const indexTimer =
       setInterval(
         loadSignals,
         15000
       );
 
-    return () =>
-      clearInterval(timer);
+    const stockTimer =
+      setInterval(
+        loadStockSignals,
+        10000
+      );
 
-  }, [loadScanners, loadSignals]);
+    const scannerTimer =
+      setInterval(
+        loadScanners,
+        10000
+      );
+
+    return () => {
+      clearInterval(indexTimer);
+      clearInterval(stockTimer);
+      clearInterval(scannerTimer);
+    };
+
+  }, [
+    loadScanners,
+    loadSignals,
+    loadStockSignals
+  ]);
 
 
   React.useEffect(() => {
@@ -1069,6 +1333,66 @@ function App() {
                   [signal.symbol]:
                     signal,
                 })
+              );
+
+            }
+
+          }
+
+
+
+          if (
+            msg.type ===
+            "stock_signal_update"
+          ) {
+
+            const signal =
+              msg.data;
+
+            if (signal?.symbol) {
+
+              setStockSignals(
+                (prev) => {
+
+                  const next = [
+                    signal,
+                    ...prev.filter(
+                      (item) =>
+                        item.symbol !==
+                        signal.symbol
+                    ),
+                  ];
+
+                  next.sort(
+                    (a, b) => {
+                      const aa =
+                        a.actionable
+                          ? 1
+                          : 0;
+
+                      const ba =
+                        b.actionable
+                          ? 1
+                          : 0;
+
+                      if (aa !== ba) {
+                        return ba - aa;
+                      }
+
+                      return (
+                        Number(
+                          b.score || 0
+                        ) -
+                        Number(
+                          a.score || 0
+                        )
+                      );
+                    }
+                  );
+
+                  return next.slice(0, 8);
+
+                }
               );
 
             }
@@ -1354,6 +1678,7 @@ function App() {
       }
 
       await loadScanners();
+      await loadStockSignals();
 
     } catch (error) {
 
@@ -1381,6 +1706,195 @@ function App() {
   return (
 
     <div className="page">
+
+      <style>{`
+        /* ===== SINGLE-SCREEN COMPACT DESKTOP OVERRIDES ===== */
+        @media (min-width: 1100px) {
+          html, body, #root {
+            height: 100%;
+            overflow: hidden;
+          }
+
+          .page {
+            min-height: 100vh !important;
+            height: 100vh !important;
+            overflow: hidden !important;
+            display: grid !important;
+            grid-template-columns: 155px minmax(0, 1fr) !important;
+          }
+
+          .sidebar {
+            width: 155px !important;
+            min-width: 155px !important;
+            padding: 14px 10px !important;
+            gap: 10px !important;
+          }
+
+          .brand {
+            margin-bottom: 8px !important;
+          }
+
+          .brand-icon {
+            width: 38px !important;
+            height: 38px !important;
+          }
+
+          .brand h2 {
+            font-size: 20px !important;
+            line-height: 0.95 !important;
+          }
+
+          .brand > span {
+            font-size: 8px !important;
+            letter-spacing: .22em !important;
+          }
+
+          .sidebar nav {
+            gap: 5px !important;
+          }
+
+          .nav {
+            min-height: 34px !important;
+            padding: 7px 8px !important;
+            border-radius: 10px !important;
+            font-size: 11px !important;
+            gap: 7px !important;
+          }
+
+          .nav svg {
+            width: 15px !important;
+            height: 15px !important;
+          }
+
+          .connection {
+            padding: 9px !important;
+            border-radius: 12px !important;
+          }
+
+          .connection b {
+            font-size: 10px !important;
+          }
+
+          .connection small {
+            font-size: 8px !important;
+          }
+
+          main {
+            height: 100vh !important;
+            overflow: hidden !important;
+            padding: 12px 16px 10px !important;
+          }
+
+          header {
+            margin-bottom: 7px !important;
+            min-height: 44px !important;
+          }
+
+          header h1 {
+            font-size: 24px !important;
+            line-height: 1 !important;
+          }
+
+          .live-pill {
+            min-height: 28px !important;
+            padding: 5px 10px !important;
+            font-size: 10px !important;
+          }
+
+          .totp-panel {
+            margin: 5px 0 8px !important;
+            padding: 7px 10px !important;
+            min-height: 44px !important;
+            display: flex !important;
+            align-items: center !important;
+            gap: 8px !important;
+          }
+
+          .totp-panel label {
+            margin: 0 !important;
+            flex: 0 0 150px !important;
+          }
+
+          .totp-panel input {
+            height: 34px !important;
+            min-height: 34px !important;
+            padding: 6px 10px !important;
+            font-size: 12px !important;
+          }
+
+          .totp-panel button {
+            height: 34px !important;
+            min-height: 34px !important;
+            padding: 6px 14px !important;
+            font-size: 10px !important;
+            white-space: nowrap !important;
+          }
+
+          .cards {
+            gap: 8px !important;
+            margin: 0 0 8px !important;
+          }
+
+          .market-card {
+            min-height: 118px !important;
+            padding: 11px 12px !important;
+            border-radius: 15px !important;
+          }
+
+          .market-title h3 {
+            font-size: 13px !important;
+          }
+
+          .market-title small,
+          .tick-time,
+          .market-change {
+            font-size: 9px !important;
+          }
+
+          .market-price {
+            font-size: 22px !important;
+            margin-top: 5px !important;
+          }
+
+          .pulse-icon {
+            width: 30px !important;
+            height: 30px !important;
+          }
+
+          .mini-wave {
+            height: 12px !important;
+            margin: 3px 0 !important;
+          }
+
+          .overview {
+            margin-top: 7px !important;
+          }
+
+          .overview-head {
+            margin-bottom: 7px !important;
+          }
+
+          .overview-head h3 {
+            font-size: 13px !important;
+          }
+
+          .overview-head small {
+            font-size: 9px !important;
+          }
+
+          .live-badge {
+            min-height: 24px !important;
+            padding: 4px 8px !important;
+            font-size: 9px !important;
+          }
+
+          .message {
+            margin-top: 5px !important;
+            min-height: 16px !important;
+            font-size: 9px !important;
+          }
+        }
+      `}</style>
 
 
       <div className="ambient-lights">
@@ -1514,8 +2028,25 @@ function App() {
             </h1>
 
 
-            <p>
-              The Raaja Bro!!
+            <p
+              style={{
+                marginTop: "4px",
+                marginBottom: 0,
+                fontSize: "18px",
+                lineHeight: 1,
+                fontWeight: 900,
+                letterSpacing: "0.08em",
+                textTransform: "none",
+                background:
+                  "linear-gradient(90deg, #66ffe2 0%, #62d6ff 48%, #b38cff 100%)",
+                WebkitBackgroundClip: "text",
+                backgroundClip: "text",
+                WebkitTextFillColor: "transparent",
+                filter:
+                  "drop-shadow(0 0 9px rgba(92, 238, 224, 0.22))",
+              }}
+            >
+              The RAAJA Bro !!!
             </p>
 
           </div>
@@ -1718,12 +2249,18 @@ function App() {
         />
 
 
+        <StockSignalsPanel
+          items={stockSignals}
+          scanners={scanners}
+          error={stockSignalError}
+        />
+
 
         <section
           className="overview glass"
           style={{
-            marginTop: "10px",
-            padding: "12px 14px",
+            marginTop: "7px",
+            padding: "9px 11px",
           }}
         >
 
