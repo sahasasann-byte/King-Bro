@@ -1,131 +1,464 @@
-
 import React from "react";
-import {createRoot} from "react-dom/client";
-import {Crown, LayoutDashboard, Activity, BarChart3, Wifi, WifiOff, RefreshCw} from "lucide-react";
+import { createRoot } from "react-dom/client";
+import {
+  Crown,
+  LayoutDashboard,
+  Activity,
+  Wifi,
+  WifiOff,
+  LockKeyhole,
+} from "lucide-react";
 import "./styles.css";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
-const INITIAL = [
-  {name:"NIFTY 50", exchange_segment:"nse_cm"},
-  {name:"SENSEX", exchange_segment:"bse_cm"},
-  {name:"BANK NIFTY", exchange_segment:"nse_cm"},
-];
+const WS_URL = API.replace(/^http/, "ws") + "/ws/market";
 
-function fmt(v){
-  if(v === null || v === undefined || Number.isNaN(Number(v))) return "—";
-  return Number(v).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2});
+const EMPTY = {
+  "NIFTY 50": { key: "NIFTY 50", ltp: null },
+  SENSEX: { key: "SENSEX", ltp: null },
+  "BANK NIFTY": { key: "BANK NIFTY", ltp: null },
+};
+
+function formatNumber(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    Number.isNaN(Number(value))
+  ) {
+    return "—";
+  }
+
+  return Number(value).toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
-function Spark({values, negative}){
-  if(values.length < 2) return <div className="spark-empty">Collecting real history…</div>;
-  const w=260,h=78,p=4;
-  const min=Math.min(...values), max=Math.max(...values);
-  const range=(max-min)||1;
-  const pts=values.map((v,i)=>{
-    const x=p+(i/(values.length-1))*(w-p*2);
-    const y=h-p-((v-min)/range)*(h-p*2);
-    return `${x},${y}`;
-  }).join(" ");
-  return <svg viewBox={`0 0 ${w} ${h}`} className="spark">
-    <polyline points={pts} fill="none" stroke={negative?"#ff5c79":"#37eda0"} strokeWidth="2.5"/>
-  </svg>;
-}
+function MarketCard({ item }) {
+  const pct = item.percent_change;
 
-function Card({x, history}){
-  const negative = x.percent_change != null && Number(x.percent_change) < 0;
-  return <div className="card glass">
-    <div className="card-head"><div><h3>{x.name}</h3><small>{x.name==="SENSEX"?"BSE":"NSE"}</small></div><Activity className={negative?"neg":"pos"}/></div>
-    <div className="price">{fmt(x.ltp)}</div>
-    <div className={negative?"change neg":"change pos"}>
-      {x.change == null ? "Waiting for Kotak quote" :
-        `${negative?"▼":"▲"} ${fmt(Math.abs(x.change))} (${negative?"":"+"}${fmt(x.percent_change)}%)`
-      }
+  const isDown =
+    pct !== null &&
+    pct !== undefined &&
+    Number(pct) < 0;
+
+  return (
+    <div className="market-card glass">
+      <div className="market-title">
+        <div>
+          <h3>{item.key}</h3>
+
+          <small>
+            {item.key === "SENSEX" ? "BSE" : "NSE"}
+          </small>
+        </div>
+
+        <Activity
+          className={isDown ? "down" : "up"}
+        />
+      </div>
+
+      <div className="market-price">
+        {formatNumber(item.ltp)}
+      </div>
+
+      <div
+        className={
+          isDown
+            ? "market-change down"
+            : "market-change up"
+        }
+      >
+        {item.change == null
+          ? "Waiting for Kotak live tick"
+          : `${isDown ? "▼" : "▲"} ${formatNumber(
+              Math.abs(item.change)
+            )}${
+              pct == null
+                ? ""
+                : ` (${
+                    isDown ? "" : "+"
+                  }${formatNumber(pct)}%)`
+            }`}
+      </div>
+
+      <div className="real-feed-line">
+        <span />
+      </div>
+
+      <div className="tick-time">
+        {item.received_at
+          ? `LIVE • ${new Date(
+              item.received_at
+            ).toLocaleTimeString("en-IN")}`
+          : "No live tick received"}
+      </div>
     </div>
-    <Spark values={history} negative={negative}/>
-    <div className="hl"><span>HIGH <b>{fmt(x.high)}</b></span><span>LOW <b>{fmt(x.low)}</b></span></div>
-  </div>
+  );
 }
 
-function App(){
-  const [indices,setIndices]=React.useState(INITIAL);
-  const [status,setStatus]=React.useState("connecting");
-  const [error,setError]=React.useState("");
-  const [updated,setUpdated]=React.useState(null);
-  const [history,setHistory]=React.useState({"NIFTY 50":[],"SENSEX":[],"BANK NIFTY":[]});
+function App() {
+  const [feed, setFeed] = React.useState(EMPTY);
 
-  async function load(){
-    try{
-      const r=await fetch(API+"/api/market/quotes",{cache:"no-store"});
-      const d=await r.json();
-      if(!r.ok){
-        const msg = typeof d.detail === "object" ? (d.detail.message || JSON.stringify(d.detail)) : d.detail;
-        throw new Error(msg || "Kotak quotes request failed");
-      }
-      setIndices(d.indices);
-      setHistory(prev=>{
-        const next={...prev};
-        d.indices.forEach(x=>{
-          if(typeof x.ltp === "number"){
-            next[x.name]=[...(prev[x.name]||[]),x.ltp].slice(-60);
+  const [status, setStatus] = React.useState({
+    broker_connected: false,
+    feed_connected: false,
+    last_tick_at: null,
+    last_error: null,
+  });
+
+  const [totp, setTotp] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [message, setMessage] = React.useState("");
+
+  React.useEffect(() => {
+    let ws;
+    let reconnectTimer;
+    let pingTimer;
+
+    const connectBrowserSocket = () => {
+      ws = new WebSocket(WS_URL);
+
+      ws.onopen = () => {
+        ws.send("hello");
+
+        pingTimer = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send("ping");
           }
-        });
-        return next;
-      });
-      setUpdated(new Date());
-      setStatus("live");
-      setError("");
-    }catch(e){
-      setStatus("offline");
-      setError(e.message || String(e));
+        }, 20000);
+      };
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+
+        if (msg.type === "status") {
+          setStatus(msg.data);
+        }
+
+        if (msg.type === "snapshot") {
+          const next = { ...EMPTY };
+
+          msg.data.forEach((item) => {
+            if (next[item.key]) {
+              next[item.key] = item;
+            }
+          });
+
+          setFeed(next);
+        }
+
+        if (msg.type === "tick") {
+          const item = msg.data;
+
+          if (
+            item.key &&
+            Object.prototype.hasOwnProperty.call(
+              EMPTY,
+              item.key
+            )
+          ) {
+            setFeed((prev) => ({
+              ...prev,
+              [item.key]: item,
+            }));
+          }
+        }
+      };
+
+      ws.onclose = () => {
+        clearInterval(pingTimer);
+
+        reconnectTimer = setTimeout(
+          connectBrowserSocket,
+          3000
+        );
+      };
+    };
+
+    connectBrowserSocket();
+
+    return () => {
+      clearInterval(pingTimer);
+      clearTimeout(reconnectTimer);
+      ws?.close();
+    };
+  }, []);
+
+  async function connectKotak(event) {
+    event.preventDefault();
+
+    if (!/^\d{6}$/.test(totp)) {
+      setMessage(
+        "Enter the current 6-digit TOTP."
+      );
+      return;
+    }
+
+    setBusy(true);
+    setMessage(
+      "Authenticating with Kotak Neo..."
+    );
+
+    try {
+      const response = await fetch(
+        API + "/api/kotak/connect",
+        {
+          method: "POST",
+
+          headers: {
+            "Content-Type": "application/json",
+          },
+
+          body: JSON.stringify({
+            totp,
+          }),
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        const detail = data.detail;
+
+        throw new Error(
+          typeof detail === "object"
+            ? detail.message ||
+                JSON.stringify(detail)
+            : detail ||
+                "Kotak connection failed"
+        );
+      }
+
+      setMessage(
+        "Kotak authenticated. Waiting for real-time ticks..."
+      );
+
+      setTotp("");
+    } catch (error) {
+      setMessage(
+        error.message || String(error)
+      );
+    } finally {
+      setBusy(false);
     }
   }
 
-  React.useEffect(()=>{
-    load();
-    const id=setInterval(load,3000);
-    return()=>clearInterval(id);
-  },[]);
+  return (
+    <div className="page">
+      <aside className="sidebar glass">
+        <div className="brand">
+          <Crown />
 
-  return <div className="shell">
-    <aside className="sidebar glass">
-      <div className="brand"><Crown/><h2>KING</h2><h2 className="bro">BRO</h2><span>TERMINAL</span></div>
-      <nav>
-        <div className="nav active"><LayoutDashboard/>Dashboard</div>
-        <div className="nav"><Activity/>Live Quotes</div>
-        <div className="nav"><BarChart3/>Charts</div>
-      </nav>
-      <div className="conn glass">
-        {status==="live"?<Wifi/>:<WifiOff/>}
-        <div><b>{status==="live"?"CONNECTED":"DISCONNECTED"}</b><small>Kotak Neo Quotes API</small><small>No mock data</small></div>
-      </div>
-    </aside>
+          <h2>KING</h2>
 
-    <main>
-      <header>
-        <div><h1>King Bro <span>Terminal</span></h1><p>Real Market. Real Data. No Mock Prices.</p></div>
-        <div className={status==="live"?"pill live":"pill off"}>● {status==="live"?"LIVE":"OFFLINE"}</div>
-      </header>
+          <h2 className="bro">
+            BRO
+          </h2>
 
-      <section className="cards">
-        {indices.map(x=><Card key={x.name} x={x} history={history[x.name]||[]}/>)}
-      </section>
-
-      <section className="overview glass">
-        <div className="overview-head">
-          <div><h3>Live Market Overview</h3><small>{status==="live"?"● Real Kotak quote polling":"● Disconnected"}</small></div>
-          <button onClick={load}><RefreshCw/> Refresh</button>
+          <span>
+            TERMINAL
+          </span>
         </div>
-        <div className="status-grid">
-          <div><span>DATA SOURCE</span><b>Kotak Neo</b><small>Quotes API</small></div>
-          <div><span>AUTH</span><b>Consumer Key</b><small>No TOTP / MPIN</small></div>
-          <div><span>REFRESH</span><b>3 Seconds</b><small>Single 3-index request</small></div>
-          <div><span>LAST UPDATE</span><b>{updated?updated.toLocaleTimeString("en-IN"):"—"}</b><small>Browser time</small></div>
+
+        <nav>
+          <div className="nav active">
+            <LayoutDashboard />
+
+            Dashboard
+          </div>
+
+          <div className="nav">
+            <Activity />
+
+            Live Market
+          </div>
+        </nav>
+
+        <div className="connection glass">
+          {status.feed_connected ? (
+            <Wifi />
+          ) : (
+            <WifiOff />
+          )}
+
+          <div>
+            <b>
+              {status.feed_connected
+                ? "CONNECTED"
+                : "DISCONNECTED"}
+            </b>
+
+            <small>
+              Kotak Neo SFeed
+            </small>
+
+            <small>
+              No mock data
+            </small>
+          </div>
         </div>
-        {error && <div className="error"><b>Kotak API error:</b> {error}</div>}
-        {!error && <div className="tip">Live values and mini-charts are built only from Kotak quote responses received by this browser session.</div>}
-      </section>
-    </main>
-  </div>
+      </aside>
+
+      <main>
+        <header>
+          <div>
+            <h1>
+              King Bro{" "}
+              <span>
+                Terminal
+              </span>
+            </h1>
+
+            <p>
+              Real Market Data • Kotak Neo •
+              No Mock Prices
+            </p>
+          </div>
+
+          <div
+            className={
+              status.feed_connected
+                ? "live-pill live"
+                : "live-pill off"
+            }
+          >
+            ●{" "}
+            {status.feed_connected
+              ? "LIVE"
+              : "OFFLINE"}
+          </div>
+        </header>
+
+        {!status.broker_connected && (
+          <form
+            className="totp-panel glass"
+            onSubmit={connectKotak}
+          >
+            <div className="login-copy">
+              <LockKeyhole />
+
+              <div>
+                <h3>
+                  Morning Kotak Login
+                </h3>
+
+                <p>
+                  Consumer Key, Mobile,
+                  UCC and MPIN are already
+                  stored on the backend.
+                </p>
+              </div>
+            </div>
+
+            <label>
+              CURRENT 6-DIGIT TOTP
+
+              <input
+                inputMode="numeric"
+                maxLength={6}
+                value={totp}
+                onChange={(event) =>
+                  setTotp(
+                    event.target.value
+                      .replace(/\D/g, "")
+                      .slice(0, 6)
+                  )
+                }
+                placeholder="123456"
+              />
+            </label>
+
+            <button
+              disabled={busy}
+            >
+              {busy
+                ? "CONNECTING..."
+                : "CONNECT LIVE DATA"}
+            </button>
+          </form>
+        )}
+
+        <section className="cards">
+          <MarketCard
+            item={feed["NIFTY 50"]}
+          />
+
+          <MarketCard
+            item={feed["SENSEX"]}
+          />
+
+          <MarketCard
+            item={feed["BANK NIFTY"]}
+          />
+        </section>
+
+        <section className="overview glass">
+          <div className="overview-head">
+            <div>
+              <h3>
+                Live Market Monitor
+              </h3>
+
+              <small
+                className={
+                  status.feed_connected
+                    ? "green"
+                    : "red"
+                }
+              >
+                ●{" "}
+                {status.feed_connected
+                  ? "Kotak live feed connected"
+                  : "Waiting for live feed"}
+              </small>
+            </div>
+          </div>
+
+          <div className="monitor">
+            {status.feed_connected ? (
+              <>
+                <Activity />
+
+                <b>
+                  Real-time ticks are
+                  arriving from Kotak Neo.
+                </b>
+
+                <span>
+                  NIFTY 50 • SENSEX • BANK
+                  NIFTY
+                </span>
+              </>
+            ) : (
+              <>
+                <WifiOff />
+
+                <b>
+                  No live market tick received.
+                </b>
+
+                <span>
+                  Enter the current TOTP above
+                  to start the Kotak session.
+                </span>
+              </>
+            )}
+          </div>
+        </section>
+
+        <div className="message">
+          {message}
+
+          {status.last_error
+            ? ` • ${status.last_error}`
+            : ""}
+        </div>
+      </main>
+    </div>
+  );
 }
 
-createRoot(document.getElementById("root")).render(<App/>);
+createRoot(
+  document.getElementById("root")
+).render(<App />);
