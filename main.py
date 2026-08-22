@@ -22,7 +22,7 @@ from config import settings
 
 app = FastAPI(
     title="King Bro Terminal API",
-    version="5.0.0",
+    version="5.1.0",
 )
 
 
@@ -41,6 +41,24 @@ app.add_middleware(
 
 class TotpRequest(BaseModel):
     totp: str = Field(min_length=6, max_length=6)
+
+
+class OptionSearchRequest(BaseModel):
+    exchange_segment: str = "nse_fo"
+    symbol: str
+    expiry: str
+    option_type: str
+    strike_price: str
+
+
+class OptionInspectRequest(BaseModel):
+    instrument_token: str
+    exchange_segment: str = "nse_fo"
+
+
+class AttachOptionRequest(BaseModel):
+    instrument_token: str
+    exchange_segment: str = "nse_fo"
 
 
 # =========================================================
@@ -85,6 +103,10 @@ active_5m = {s: None for s in SIGNAL_SYMBOLS}
 
 signals: dict[str, dict[str, Any]] = {}
 signal_history = deque(maxlen=100)
+
+
+# Latest inspected option intelligence, keyed by "exchange|token".
+option_intelligence: dict[str, dict[str, Any]] = {}
 
 # Daily CPR/Fib Pivot is intentionally not fabricated.
 # It needs previous-day High/Low/Close bootstrap, which will be wired
@@ -568,6 +590,318 @@ def canonical_index_name(
         return "NIFTY 50"
 
     return None
+
+
+
+# =========================================================
+# OPTION / MARKET INTELLIGENCE MODULE
+# =========================================================
+
+def _normalise_rows(response):
+    """
+    Kotak SDK responses can be a list directly, or a dict containing data.
+    Return a list without inventing data.
+    """
+    if response is None:
+        return []
+
+    if isinstance(response, list):
+        return response
+
+    if isinstance(response, dict):
+        data = response.get("data")
+
+        if isinstance(data, list):
+            return data
+
+        # Some SDK methods may return a single row.
+        if isinstance(data, dict):
+            return [data]
+
+    return []
+
+
+def _depth_side_totals(rows):
+    qty = 0.0
+    orders = 0.0
+
+    if not isinstance(rows, list):
+        return qty, orders
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        qty += number(row.get("quantity")) or 0.0
+        orders += number(row.get("orders")) or 0.0
+
+    return qty, orders
+
+
+def _best_depth_price(rows):
+    if not isinstance(rows, list) or not rows:
+        return None
+
+    first = rows[0]
+
+    if not isinstance(first, dict):
+        return None
+
+    return number(first.get("price"))
+
+
+def _analyse_option_quote(row: dict[str, Any]):
+    """
+    Convert a real Kotak quote row into option intelligence.
+    Uses only fields documented by Kotak Quotes API:
+    LTP, volume, OI, total buy/sell, OHLC and 5-level depth.
+    """
+    depth = row.get("depth") or {}
+
+    buys = depth.get("buy") or []
+    sells = depth.get("sell") or []
+
+    buy_depth_qty, buy_orders = _depth_side_totals(buys)
+    sell_depth_qty, sell_orders = _depth_side_totals(sells)
+
+    best_bid = _best_depth_price(buys)
+    best_ask = _best_depth_price(sells)
+
+    spread = None
+    spread_pct = None
+
+    if (
+        best_bid is not None
+        and best_ask is not None
+        and best_ask >= best_bid
+    ):
+        spread = best_ask - best_bid
+
+        mid = (best_bid + best_ask) / 2.0
+
+        if mid > 0:
+            spread_pct = (spread / mid) * 100.0
+
+    total_depth = buy_depth_qty + sell_depth_qty
+
+    depth_imbalance = None
+
+    if total_depth > 0:
+        depth_imbalance = (
+            (buy_depth_qty - sell_depth_qty)
+            / total_depth
+        ) * 100.0
+
+    total_buy = number(row.get("total_buy"))
+    total_sell = number(row.get("total_sell"))
+
+    book_imbalance = None
+
+    if (
+        total_buy is not None
+        and total_sell is not None
+        and (total_buy + total_sell) > 0
+    ):
+        book_imbalance = (
+            (total_buy - total_sell)
+            / (total_buy + total_sell)
+        ) * 100.0
+
+    ltp = (
+        number(row.get("ltp"))
+        or number(row.get("last_traded_price"))
+        or number(row.get("lp"))
+    )
+
+    oi = (
+        number(row.get("open_int"))
+        or number(row.get("oi"))
+        or number(row.get("open_interest"))
+    )
+
+    volume = (
+        number(row.get("last_volume"))
+        or number(row.get("volume"))
+        or number(row.get("vol"))
+    )
+
+    liquidity_score = 0
+    liquidity_reasons = []
+
+    if ltp is not None and ltp > 0:
+        liquidity_score += 20
+        liquidity_reasons.append("valid LTP")
+
+    if volume is not None and volume > 0:
+        liquidity_score += 20
+        liquidity_reasons.append("traded volume")
+
+    if oi is not None and oi > 0:
+        liquidity_score += 20
+        liquidity_reasons.append("open interest")
+
+    if best_bid is not None and best_ask is not None:
+        liquidity_score += 20
+        liquidity_reasons.append("two-sided market")
+
+    if spread_pct is not None:
+        if spread_pct <= 1.0:
+            liquidity_score += 20
+            liquidity_reasons.append("tight spread")
+        elif spread_pct <= 2.0:
+            liquidity_score += 10
+            liquidity_reasons.append("acceptable spread")
+
+    if depth_imbalance is None:
+        order_flow_bias = "UNKNOWN"
+    elif depth_imbalance >= 15:
+        order_flow_bias = "BUYING"
+    elif depth_imbalance <= -15:
+        order_flow_bias = "SELLING"
+    else:
+        order_flow_bias = "BALANCED"
+
+    return {
+        "exchange_token":
+            str(
+                row.get("exchange_token")
+                or row.get("instrument_token")
+                or ""
+            ),
+        "display_symbol":
+            row.get("display_symbol")
+            or row.get("trading_symbol")
+            or "",
+        "exchange":
+            row.get("exchange") or "",
+        "ltp": ltp,
+        "change": number(row.get("change")),
+        "percent_change":
+            number(
+                row.get("per_change")
+                or row.get("percentage_change")
+            ),
+        "volume": volume,
+        "open_interest": oi,
+        "total_buy": total_buy,
+        "total_sell": total_sell,
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "spread": spread,
+        "spread_pct": spread_pct,
+        "depth_buy_qty": buy_depth_qty,
+        "depth_sell_qty": sell_depth_qty,
+        "depth_buy_orders": buy_orders,
+        "depth_sell_orders": sell_orders,
+        "depth_imbalance_pct": depth_imbalance,
+        "book_imbalance_pct": book_imbalance,
+        "order_flow_bias": order_flow_bias,
+        "liquidity_score": liquidity_score,
+        "liquidity_reasons": liquidity_reasons,
+        "ohlc": row.get("ohlc"),
+        "depth": depth,
+        "greeks": {
+            "ready": False,
+            "reason": (
+                "Kotak Quotes API documents price/OI/depth but not "
+                "option Greeks. Greeks will be calculated only after "
+                "expiry/strike/underlying/IV inputs are wired."
+            ),
+        },
+        "vix": {
+            "ready": False,
+            "reason": (
+                "India VIX is intentionally not guessed in this module. "
+                "It will be wired as a dedicated market-data input."
+            ),
+        },
+        "source": "Kotak Neo Quotes",
+        "mock_data": False,
+        "received_at":
+            datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _quotes_sync(
+    instrument_token: str,
+    exchange_segment: str,
+):
+    client = NeoAPI(
+        consumer_key=settings.KOTAK_CONSUMER_KEY,
+        environment=settings.KOTAK_ENVIRONMENT,
+    )
+
+    response = client.quotes(
+        instrument_tokens=[
+            {
+                "instrument_token":
+                    str(instrument_token),
+                "exchange_segment":
+                    str(exchange_segment),
+            }
+        ],
+        quote_type="all",
+    )
+
+    rows = _normalise_rows(response)
+
+    if not rows:
+        raise RuntimeError(
+            "Kotak Quotes returned no instrument data."
+        )
+
+    return rows[0]
+
+
+def _search_option_sync(
+    exchange_segment: str,
+    symbol: str,
+    expiry: str,
+    option_type: str,
+    strike_price: str,
+):
+    client = NeoAPI(
+        consumer_key=settings.KOTAK_CONSUMER_KEY,
+        environment=settings.KOTAK_ENVIRONMENT,
+    )
+
+    response = client.search_scrip(
+        exchange_segment=exchange_segment,
+        symbol=symbol,
+        expiry=expiry,
+        option_type=option_type,
+        strike_price=strike_price,
+    )
+
+    rows = _normalise_rows(response)
+
+    # Some versions return a raw list.
+    if isinstance(response, list):
+        rows = response
+
+    return rows
+
+
+async def inspect_option_contract(
+    instrument_token: str,
+    exchange_segment: str,
+):
+    row = await asyncio.to_thread(
+        _quotes_sync,
+        instrument_token,
+        exchange_segment,
+    )
+
+    analysis = _analyse_option_quote(row)
+
+    key = (
+        f"{exchange_segment}|"
+        f"{instrument_token}"
+    )
+
+    option_intelligence[key] = analysis
+
+    return analysis
 
 
 # =========================================================
@@ -1151,6 +1485,196 @@ async def get_signal(symbol: str):
         "five_minute_candles": list(candles_5m[key])[-50:],
     }
 
+
+
+
+# =========================================================
+# OPTION / MARKET INTELLIGENCE API
+# =========================================================
+
+@app.post("/api/options/search")
+async def search_option(
+    body: OptionSearchRequest
+):
+    """
+    Search exact option contract using Kotak scrip search.
+    User/strategy must provide expiry, CE/PE and strike explicitly.
+    This avoids guessing the broker's expiry format or contract token.
+    """
+
+    option_type = body.option_type.strip().upper()
+
+    if option_type not in {"CE", "PE"}:
+        raise HTTPException(
+            status_code=400,
+            detail="option_type must be CE or PE.",
+        )
+
+    try:
+        rows = await asyncio.to_thread(
+            _search_option_sync,
+            body.exchange_segment,
+            body.symbol.strip().upper(),
+            body.expiry.strip(),
+            option_type,
+            body.strike_price.strip(),
+        )
+
+        return {
+            "source": "Kotak Neo Scrip Search",
+            "mock_data": False,
+            "count": len(rows),
+            "items": rows[:20],
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            },
+        )
+
+
+@app.post("/api/options/inspect")
+async def inspect_option(
+    body: OptionInspectRequest
+):
+    """
+    Fetch one real option quote and calculate:
+    LTP, OI, volume, spread, depth imbalance and liquidity score.
+    """
+    try:
+        return await inspect_option_contract(
+            body.instrument_token,
+            body.exchange_segment,
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            },
+        )
+
+
+@app.post("/api/signals/{symbol}/attach-option")
+async def attach_option_to_signal(
+    symbol: str,
+    body: AttachOptionRequest,
+):
+    aliases = {
+        "NIFTY": "NIFTY 50",
+        "NIFTY50": "NIFTY 50",
+        "NIFTY 50": "NIFTY 50",
+        "SENSEX": "SENSEX",
+    }
+
+    key = aliases.get(
+        symbol.strip().upper()
+    )
+
+    if not key:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Signal engine scans only "
+                "NIFTY 50 and SENSEX."
+            ),
+        )
+
+    if key not in signals:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "No signal snapshot exists yet. "
+                "Wait for the live candle engine."
+            ),
+        )
+
+    try:
+        option_data = (
+            await inspect_option_contract(
+                body.instrument_token,
+                body.exchange_segment,
+            )
+        )
+
+        signal = dict(signals[key])
+
+        signal["option_contract"] = {
+            "instrument_token":
+                body.instrument_token,
+            "exchange_segment":
+                body.exchange_segment,
+            "display_symbol":
+                option_data.get(
+                    "display_symbol"
+                ),
+        }
+
+        signal["option_ltp"] = (
+            option_data.get("ltp")
+        )
+
+        signal["option_intelligence"] = (
+            option_data
+        )
+
+        # Quality confirmation is additive only.
+        # It does NOT overwrite the technical score.
+        option_quality_score = (
+            option_data.get(
+                "liquidity_score"
+            )
+            or 0
+        )
+
+        signal["option_quality_score"] = (
+            option_quality_score
+        )
+
+        signal["option_quality_pass"] = (
+            option_quality_score >= 60
+        )
+
+        signals[key] = signal
+
+        await broadcast({
+            "type":
+                "signal_update",
+            "data":
+                signal,
+        })
+
+        return signal
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_type":
+                    type(exc).__name__,
+                "message":
+                    str(exc),
+            },
+        )
+
+
+@app.get("/api/options/cache")
+async def option_cache():
+    return {
+        "count":
+            len(option_intelligence),
+        "items":
+            option_intelligence,
+    }
 
 
 # =========================================================
