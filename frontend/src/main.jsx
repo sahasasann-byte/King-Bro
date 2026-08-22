@@ -11,6 +11,7 @@ import {
   Radio,
   CircleDot
 } from "lucide-react";
+
 import "./styles.css";
 
 const API =
@@ -98,9 +99,11 @@ function MarketCard({ item }) {
 
       </div>
 
+
       <div className="market-price">
         {formatNumber(item.ltp)}
       </div>
+
 
       <div
         className={
@@ -111,8 +114,11 @@ function MarketCard({ item }) {
       >
         {change == null
           ? "Waiting for Kotak live tick"
+
           : `${
-              isDown ? "▼" : "▲"
+              isDown
+                ? "▼"
+                : "▲"
             } ${
               formatNumber(
                 Math.abs(change)
@@ -120,6 +126,7 @@ function MarketCard({ item }) {
             }${
               pct == null
                 ? ""
+
                 : ` (${
                     isDown
                       ? ""
@@ -129,9 +136,11 @@ function MarketCard({ item }) {
         }
       </div>
 
+
       <div className="mini-wave">
         <span />
       </div>
+
 
       <div className="tick-time">
 
@@ -176,31 +185,24 @@ function App() {
   const [message, setMessage] =
     React.useState("");
 
-  /*
-   * IMPORTANT:
-   * Login error is kept separately.
-   *
-   * Even if websocket/backend state briefly
-   * reports broker_connected=true,
-   * a failed TOTP keeps the login panel visible.
-   */
   const [loginError, setLoginError] =
     React.useState("");
 
 
   React.useEffect(() => {
 
-    let ws;
-    let reconnectTimer;
-    let pingTimer;
+    let ws = null;
+    let reconnectTimer = null;
+    let pingTimer = null;
     let destroyed = false;
 
 
-    const connectBrowserSocket = () => {
+    function connectBrowserSocket() {
 
       if (destroyed) {
         return;
       }
+
 
       try {
 
@@ -228,9 +230,11 @@ function App() {
           // ignore
         }
 
+
         clearInterval(
           pingTimer
         );
+
 
         pingTimer =
           setInterval(() => {
@@ -250,6 +254,7 @@ function App() {
             }
 
           }, 20000);
+
       };
 
 
@@ -272,16 +277,17 @@ function App() {
               msg.data || {}
             );
 
-            /*
-             * Successful backend session:
-             * clear any old login error.
-             */
+
             if (
               msg.data
-                ?.broker_connected
+                ?.feed_connected
             ) {
 
               setLoginError("");
+
+              setMessage(
+                "Kotak live feed connected."
+              );
 
             }
 
@@ -297,12 +303,14 @@ function App() {
               ...EMPTY,
             };
 
+
             const rows =
               Array.isArray(
                 msg.data
               )
                 ? msg.data
                 : [];
+
 
             rows.forEach(
               (item) => {
@@ -320,7 +328,9 @@ function App() {
               }
             );
 
+
             setFeed(next);
+
           }
 
 
@@ -331,6 +341,7 @@ function App() {
 
             const item =
               msg.data;
+
 
             if (
               item?.key &&
@@ -363,13 +374,12 @@ function App() {
           );
 
         }
+
       };
 
 
       ws.onerror = () => {
-        /*
-         * onclose will handle retry.
-         */
+        // onclose handles reconnect
       };
 
 
@@ -378,6 +388,7 @@ function App() {
         clearInterval(
           pingTimer
         );
+
 
         if (
           !destroyed
@@ -390,8 +401,10 @@ function App() {
             );
 
         }
+
       };
-    };
+
+    }
 
 
     connectBrowserSocket();
@@ -408,6 +421,7 @@ function App() {
       clearTimeout(
         reconnectTimer
       );
+
 
       try {
         ws?.close();
@@ -427,19 +441,19 @@ function App() {
     event.preventDefault();
 
 
-    /*
-     * Browser-side TOTP validation.
-     */
     if (
       !/^\d{6}$/.test(totp)
     ) {
 
+      const errorText =
+        "Enter the current 6-digit TOTP.";
+
       setLoginError(
-        "Enter the current 6-digit TOTP."
+        errorText
       );
 
       setMessage(
-        "Enter the current 6-digit TOTP."
+        errorText
       );
 
       return;
@@ -477,9 +491,6 @@ function App() {
         );
 
 
-      /*
-       * Safely parse backend response.
-       */
       let data = {};
 
       try {
@@ -494,9 +505,6 @@ function App() {
       }
 
 
-      /*
-       * Wrong TOTP / MPIN / API error
-       */
       if (!response.ok) {
 
         const detail =
@@ -504,6 +512,7 @@ function App() {
 
         let errorMessage =
           "Kotak authentication failed.";
+
 
         if (
           typeof detail ===
@@ -531,25 +540,20 @@ function App() {
         throw new Error(
           errorMessage
         );
+
       }
 
 
-      /*
-       * SUCCESS
-       */
       setLoginError("");
 
       setMessage(
-        "Kotak authenticated. Waiting for real-time ticks..."
+        "Kotak authenticated. Starting live feed..."
       );
+
 
       setTotp("");
 
 
-      /*
-       * Immediate local UI update.
-       * WebSocket status will confirm afterward.
-       */
       setStatus(
         (prev) => ({
           ...prev,
@@ -565,37 +569,29 @@ function App() {
 
     } catch (error) {
 
-      const text =
+      const errorText =
         error?.message ||
         String(error) ||
         "Kotak connection failed.";
 
 
-      /*
-       * CRITICAL FIX:
-       *
-       * Failed TOTP MUST NOT hide
-       * the login panel.
-       */
       setLoginError(
-        text
+        errorText
       );
+
 
       setMessage(
-        `Login failed: ${text}`
+        `Login failed: ${errorText}`
       );
 
 
-      /*
-       * Clear bad/expired TOTP.
-       */
       setTotp("");
 
 
       /*
-       * Force local broker state false.
-       * This prevents stale UI state
-       * from hiding the TOTP box.
+       * IMPORTANT:
+       * Wrong TOTP should always bring
+       * the login UI back.
        */
       setStatus(
         (prev) => ({
@@ -615,19 +611,20 @@ function App() {
       setBusy(false);
 
     }
+
   }
 
 
   /*
-   * IMPORTANT FIX:
+   * CRITICAL FIX
    *
-   * Login panel stays visible when:
-   * 1. broker is disconnected
-   * OR
-   * 2. last login attempt failed.
+   * Login panel stays visible until
+   * the actual live market feed connects.
+   *
+   * broker_connected alone is NOT enough.
    */
   const showLoginPanel =
-    !status.broker_connected ||
+    !status.feed_connected ||
     Boolean(loginError);
 
 
@@ -673,13 +670,16 @@ function App() {
             <Crown />
           </div>
 
+
           <h2>
             KING
           </h2>
 
+
           <h2 className="bro">
             BRO
           </h2>
+
 
           <span>
             TERMINAL
@@ -795,6 +795,7 @@ function App() {
 
             <CircleDot />
 
+
             {status.feed_connected
               ? "LIVE"
               : "OFFLINE"
@@ -849,7 +850,8 @@ function App() {
 
                 inputMode="numeric"
 
-                autoComplete="one-time-code"
+                autoComplete=
+                  "one-time-code"
 
                 maxLength={6}
 
@@ -873,15 +875,12 @@ function App() {
                           6
                         );
 
+
                     setTotp(
                       clean
                     );
 
 
-                    /*
-                     * User started entering
-                     * a fresh TOTP.
-                     */
                     if (
                       loginError
                     ) {
@@ -891,6 +890,7 @@ function App() {
                       );
 
                     }
+
                   }
                 }
 
@@ -952,6 +952,7 @@ function App() {
             }
           />
 
+
           <MarketCard
             item={
               feed[
@@ -959,6 +960,7 @@ function App() {
               ]
             }
           />
+
 
           <MarketCard
             item={
@@ -998,6 +1000,7 @@ function App() {
               >
 
                 ●{" "}
+
 
                 {status.feed_connected
                   ? "Kotak live feed connected"
