@@ -22,7 +22,7 @@ from config import settings
 
 app = FastAPI(
     title="King Bro Terminal API",
-    version="5.1.0",
+    version="5.2.0",
 )
 
 
@@ -46,9 +46,9 @@ class TotpRequest(BaseModel):
 class OptionSearchRequest(BaseModel):
     exchange_segment: str = "nse_fo"
     symbol: str
-    expiry: str
-    option_type: str
-    strike_price: str
+    expiry: str = ""
+    option_type: str = ""
+    strike_price: str = ""
 
 
 class OptionInspectRequest(BaseModel):
@@ -856,30 +856,256 @@ def _quotes_sync(
 def _search_option_sync(
     exchange_segment: str,
     symbol: str,
-    expiry: str,
-    option_type: str,
-    strike_price: str,
+    expiry: str = "",
+    option_type: str = "",
+    strike_price: str = "",
 ):
     client = NeoAPI(
         consumer_key=settings.KOTAK_CONSUMER_KEY,
         environment=settings.KOTAK_ENVIRONMENT,
     )
 
+    # Kotak search_scrip documents exchange_segment as mandatory and
+    # symbol/expiry/option_type/strike_price as optional filters.
     response = client.search_scrip(
         exchange_segment=exchange_segment,
-        symbol=symbol,
-        expiry=expiry,
-        option_type=option_type,
-        strike_price=strike_price,
+        symbol=symbol or "",
+        expiry=expiry or "",
+        option_type=option_type or "",
+        strike_price=strike_price or "",
     )
 
     rows = _normalise_rows(response)
 
-    # Some versions return a raw list.
+    # Some SDK versions return a raw list directly.
     if isinstance(response, list):
         rows = response
 
     return rows
+
+
+def _field(row, *names):
+    for name in names:
+        if name in row and row.get(name) not in (None, ""):
+            return row.get(name)
+    return None
+
+
+def _normalise_contract(row: dict[str, Any]):
+    strike = number(
+        _field(
+            row,
+            "dStrikePrice;",
+            "dStrikePrice",
+            "strike_price",
+            "strikePrice",
+        )
+    )
+
+    token = _field(
+        row,
+        "pSymbol",
+        "token",
+        "instrument_token",
+        "exchange_token",
+    )
+
+    expiry = _field(
+        row,
+        "pExpiryDate",
+        "expiry",
+        "expiry_date",
+    )
+
+    option_type = str(
+        _field(
+            row,
+            "pOptionType",
+            "option_type",
+            "optionType",
+        )
+        or ""
+    ).upper()
+
+    trading_symbol = str(
+        _field(
+            row,
+            "pTrdSymbol",
+            "trading_symbol",
+            "display_symbol",
+        )
+        or ""
+    )
+
+    symbol_name = str(
+        _field(
+            row,
+            "pSymbolName",
+            "symbol",
+            "symbol_name",
+        )
+        or ""
+    )
+
+    return {
+        "instrument_token": str(token or ""),
+        "symbol": symbol_name,
+        "trading_symbol": trading_symbol,
+        "expiry": str(expiry or ""),
+        "option_type": option_type,
+        "strike_price": strike,
+        "raw": row,
+    }
+
+
+def _atm_candidates(rows, underlying_ltp: float, direction: str):
+    wanted_type = "CE" if direction == "CALL" else "PE"
+
+    contracts = []
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        item = _normalise_contract(row)
+
+        if item["option_type"] != wanted_type:
+            continue
+
+        if not item["instrument_token"]:
+            continue
+
+        if item["strike_price"] is None:
+            continue
+
+        contracts.append(item)
+
+    if not contracts:
+        return []
+
+    # Prefer contracts closest to spot. We do not guess an expiry date here.
+    contracts.sort(
+        key=lambda item: abs(
+            float(item["strike_price"]) - float(underlying_ltp)
+        )
+    )
+
+    return contracts
+
+
+async def auto_discover_option(symbol: str, direction: str):
+    """
+    Discover a real option contract from Kotak scrip search without
+    hard-coding expiry or strike.
+
+    We deliberately do not guess expiry. Search results are ranked by
+    strike distance to live underlying LTP, then real quote liquidity.
+    """
+    ltp = latest.get(symbol, {}).get("ltp")
+
+    if ltp is None:
+        raise RuntimeError(
+            f"No live underlying LTP available for {symbol}."
+        )
+
+    if symbol == "NIFTY 50":
+        exchange_segment = "nse_fo"
+        search_symbol = "NIFTY"
+    elif symbol == "SENSEX":
+        exchange_segment = "bse_fo"
+        search_symbol = "SENSEX"
+    else:
+        raise RuntimeError("Unsupported underlying.")
+
+    rows = await asyncio.to_thread(
+        _search_option_sync,
+        exchange_segment,
+        search_symbol,
+        "",
+        "",
+        "",
+    )
+
+    candidates = _atm_candidates(rows, float(ltp), direction)
+
+    if not candidates:
+        return {
+            "ready": False,
+            "symbol": symbol,
+            "direction": direction,
+            "underlying_ltp": ltp,
+            "exchange_segment": exchange_segment,
+            "search_symbol": search_symbol,
+            "search_rows": len(rows),
+            "reason": (
+                "Kotak scrip search returned no usable CE/PE candidates "
+                "for automatic discovery."
+            ),
+        }
+
+    # Inspect only a small nearest-ATM set to keep REST load low.
+    inspected = []
+
+    for candidate in candidates[:6]:
+        try:
+            q = await inspect_option_contract(
+                candidate["instrument_token"],
+                exchange_segment,
+            )
+
+            inspected.append({
+                **candidate,
+                "quote": q,
+            })
+        except Exception as exc:
+            inspected.append({
+                **candidate,
+                "quote_error": f"{type(exc).__name__}: {exc}",
+            })
+
+    usable = [
+        item
+        for item in inspected
+        if isinstance(item.get("quote"), dict)
+        and item["quote"].get("ltp") is not None
+    ]
+
+    if not usable:
+        return {
+            "ready": False,
+            "symbol": symbol,
+            "direction": direction,
+            "underlying_ltp": ltp,
+            "exchange_segment": exchange_segment,
+            "search_symbol": search_symbol,
+            "search_rows": len(rows),
+            "candidates_checked": inspected,
+            "reason": "Candidate contracts were found, but no usable live quote was returned.",
+        }
+
+    # Nearest ATM is primary; liquidity breaks close ties.
+    usable.sort(
+        key=lambda item: (
+            abs(float(item["strike_price"]) - float(ltp)),
+            -(item["quote"].get("liquidity_score") or 0),
+        )
+    )
+
+    selected = usable[0]
+
+    return {
+        "ready": True,
+        "symbol": symbol,
+        "direction": direction,
+        "underlying_ltp": ltp,
+        "exchange_segment": exchange_segment,
+        "search_symbol": search_symbol,
+        "search_rows": len(rows),
+        "selected": selected,
+        "candidates_checked": inspected,
+        "source": "Kotak Neo Scrip Search + Quotes",
+        "mock_data": False,
+    }
 
 
 async def inspect_option_contract(
@@ -1497,17 +1723,16 @@ async def search_option(
     body: OptionSearchRequest
 ):
     """
-    Search exact option contract using Kotak scrip search.
-    User/strategy must provide expiry, CE/PE and strike explicitly.
-    This avoids guessing the broker's expiry format or contract token.
+    Flexible Kotak scrip search.
+    exchange_segment is mandatory; expiry/option_type/strike are optional.
     """
 
     option_type = body.option_type.strip().upper()
 
-    if option_type not in {"CE", "PE"}:
+    if option_type and option_type not in {"CE", "PE"}:
         raise HTTPException(
             status_code=400,
-            detail="option_type must be CE or PE.",
+            detail="option_type must be CE, PE, or blank.",
         )
 
     try:
@@ -1523,9 +1748,56 @@ async def search_option(
         return {
             "source": "Kotak Neo Scrip Search",
             "mock_data": False,
+            "filters": {
+                "exchange_segment": body.exchange_segment,
+                "symbol": body.symbol.strip().upper(),
+                "expiry": body.expiry.strip(),
+                "option_type": option_type,
+                "strike_price": body.strike_price.strip(),
+            },
             "count": len(rows),
-            "items": rows[:20],
+            "items": rows[:100],
         }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            },
+        )
+
+
+@app.post("/api/options/auto/{symbol}/{direction}")
+async def auto_option(
+    symbol: str,
+    direction: str,
+):
+    aliases = {
+        "NIFTY": "NIFTY 50",
+        "NIFTY50": "NIFTY 50",
+        "NIFTY 50": "NIFTY 50",
+        "SENSEX": "SENSEX",
+    }
+
+    key = aliases.get(symbol.strip().upper())
+    side = direction.strip().upper()
+
+    if not key:
+        raise HTTPException(
+            status_code=404,
+            detail="Auto option discovery supports NIFTY 50 and SENSEX.",
+        )
+
+    if side not in {"CALL", "PUT"}:
+        raise HTTPException(
+            status_code=400,
+            detail="direction must be CALL or PUT.",
+        )
+
+    try:
+        return await auto_discover_option(key, side)
 
     except Exception as exc:
         raise HTTPException(
