@@ -1,5 +1,8 @@
 import asyncio
 import re
+import json
+import os
+from pathlib import Path
 from datetime import datetime, timezone, date
 from typing import Optional, Any
 from collections import deque
@@ -23,7 +26,7 @@ from config import settings
 
 app = FastAPI(
     title="King Bro Terminal API",
-    version="6.0.0",
+    version="6.1.0",
 )
 
 
@@ -103,7 +106,32 @@ active_1m = {s: None for s in SIGNAL_SYMBOLS}
 active_5m = {s: None for s in SIGNAL_SYMBOLS}
 
 signals: dict[str, dict[str, Any]] = {}
+
 signal_history = deque(maxlen=100)
+
+# =========================================================
+# CANDLE PERSISTENCE / RESTORE — V6.1
+# =========================================================
+
+# Auto-use a Render persistent disk if mounted at /var/data.
+# Otherwise fall back to /tmp (not durable across a new Render instance).
+_PERSIST_ROOT = (
+    Path("/var/data/kingbro")
+    if Path("/var/data").exists()
+    else Path("/tmp/kingbro")
+)
+_PERSIST_ROOT.mkdir(parents=True, exist_ok=True)
+
+CANDLE_STATE_FILE = _PERSIST_ROOT / "candle_state.json"
+
+persistence_status = {
+    "path": str(CANDLE_STATE_FILE),
+    "persistent_disk_detected": str(CANDLE_STATE_FILE).startswith("/var/data/"),
+    "restored": False,
+    "last_saved_at": None,
+    "last_restore_at": None,
+    "last_error": None,
+}
 
 
 # Latest inspected option intelligence, keyed by "exchange|token".
@@ -123,6 +151,104 @@ daily_levels = {
     for s in SIGNAL_SYMBOLS
 }
 
+
+
+def _serialisable_candle_state():
+    return {
+        "version": 1,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "candles_1m": {
+            symbol: list(candles_1m[symbol])
+            for symbol in SIGNAL_SYMBOLS
+        },
+        "candles_5m": {
+            symbol: list(candles_5m[symbol])
+            for symbol in SIGNAL_SYMBOLS
+        },
+        "active_1m": {
+            symbol: active_1m[symbol]
+            for symbol in SIGNAL_SYMBOLS
+        },
+        "active_5m": {
+            symbol: active_5m[symbol]
+            for symbol in SIGNAL_SYMBOLS
+        },
+    }
+
+
+def _save_candle_state_sync():
+    try:
+        payload = _serialisable_candle_state()
+        tmp_file = CANDLE_STATE_FILE.with_suffix(".tmp")
+
+        tmp_file.write_text(
+            json.dumps(payload, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+        os.replace(tmp_file, CANDLE_STATE_FILE)
+
+        persistence_status["last_saved_at"] = payload["saved_at"]
+        persistence_status["last_error"] = None
+
+    except Exception as exc:
+        persistence_status["last_error"] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+
+
+async def save_candle_state():
+    await asyncio.to_thread(_save_candle_state_sync)
+
+
+def _restore_candle_state_sync():
+    persistence_status["last_restore_at"] = (
+        datetime.now(timezone.utc).isoformat()
+    )
+
+    if not CANDLE_STATE_FILE.exists():
+        persistence_status["restored"] = False
+        return
+
+    try:
+        payload = json.loads(
+            CANDLE_STATE_FILE.read_text(encoding="utf-8")
+        )
+
+        for symbol in SIGNAL_SYMBOLS:
+            one = payload.get("candles_1m", {}).get(symbol, [])
+            five = payload.get("candles_5m", {}).get(symbol, [])
+
+            candles_1m[symbol].clear()
+            candles_5m[symbol].clear()
+
+            for candle in one[-MAX_1M_CANDLES:]:
+                if isinstance(candle, dict):
+                    candles_1m[symbol].append(candle)
+
+            for candle in five[-MAX_5M_CANDLES:]:
+                if isinstance(candle, dict):
+                    candles_5m[symbol].append(candle)
+
+            a1 = payload.get("active_1m", {}).get(symbol)
+            a5 = payload.get("active_5m", {}).get(symbol)
+
+            active_1m[symbol] = a1 if isinstance(a1, dict) else None
+            active_5m[symbol] = a5 if isinstance(a5, dict) else None
+
+        persistence_status["restored"] = True
+        persistence_status["last_error"] = None
+
+    except Exception as exc:
+        persistence_status["restored"] = False
+        persistence_status["last_error"] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+
+
+@app.on_event("startup")
+async def restore_candle_state_on_startup():
+    await asyncio.to_thread(_restore_candle_state_sync)
 
 def _ema(values, period):
     if len(values) < period:
@@ -569,6 +695,7 @@ async def consume_signal_tick(symbol, price, received_at):
 
     # Indicator calculation only at candle boundary, not on every tick.
     if closed:
+        await save_candle_state()
         await _evaluate_signal(symbol)
 
 
@@ -1838,6 +1965,40 @@ async def health():
                 for s in SIGNAL_SYMBOLS
             },
         },
+        "persistence": persistence_status,
+    }
+
+
+
+# =========================================================
+# STATE DIAGNOSTICS — V6.1
+# =========================================================
+
+@app.get("/api/state")
+async def state_diagnostics():
+    return {
+        "persistence": persistence_status,
+        "signal_engine": {
+            "one_minute_candles": {
+                s: len(candles_1m[s])
+                for s in SIGNAL_SYMBOLS
+            },
+            "five_minute_candles": {
+                s: len(candles_5m[s])
+                for s in SIGNAL_SYMBOLS
+            },
+            "active_1m": active_1m,
+            "active_5m": active_5m,
+        },
+    }
+
+
+@app.post("/api/state/save")
+async def force_state_save():
+    await save_candle_state()
+    return {
+        "ok": persistence_status.get("last_error") is None,
+        "persistence": persistence_status,
     }
 
 
