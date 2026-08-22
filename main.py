@@ -15,6 +15,7 @@ from neo_api_client import NeoAPI
 from neo_api_client.websocket.feed import (
     WsToken,
     SFeedIndex,
+    SFeedScrip,
 )
 
 from config import settings
@@ -26,7 +27,7 @@ from config import settings
 
 app = FastAPI(
     title="King Bro Terminal API",
-    version="7.0.0",
+    version="7.1.0",
 )
 
 
@@ -83,6 +84,7 @@ status = {
 
 neo_client: Optional[NeoAPI] = None
 feed_task: Optional[asyncio.Task] = None
+stock_feed_task: Optional[asyncio.Task] = None
 
 
 
@@ -119,7 +121,80 @@ scanner_state = {
     "index_scan_enabled": True,
     "stock_scan_enabled": False,
     "stock_scan_running": False,
+    "stock_resolved": 0,
+    "stock_unresolved": 0,
+    "stock_last_error": None,
 }
+
+# Fixed V7.1 intraday universe.
+# No price filter. Symbols are resolved to current Kotak NSE cash tokens at runtime.
+STOCK_UNIVERSE = (
+    "RELIANCE",
+    "HDFCBANK",
+    "ICICIBANK",
+    "SBIN",
+    "AXISBANK",
+    "KOTAKBANK",
+    "INDUSINDBK",
+    "BAJFINANCE",
+    "TATAMOTORS",
+    "M&M",
+    "MARUTI",
+    "EICHERMOT",
+    "TVSMOTOR",
+    "TATASTEEL",
+    "HINDALCO",
+    "JSWSTEEL",
+    "ADANIENT",
+    "ADANIPORTS",
+    "LT",
+    "BEL",
+    "HAL",
+    "BHEL",
+    "RVNL",
+    "IRFC",
+    "PFC",
+    "RECLTD",
+    "POWERGRID",
+    "NTPC",
+    "TATAPOWER",
+    "COALINDIA",
+    "ONGC",
+    "BPCL",
+    "IOC",
+    "ITC",
+    "TRENT",
+    "DLF",
+    "INFY",
+    "TCS",
+    "BHARTIARTL",
+    "SUNPHARMA",
+)
+
+stock_token_map: dict[str, dict[str, str]] = {}
+stock_latest: dict[str, dict[str, Any]] = {}
+
+STOCK_MAX_1M = 180
+STOCK_MAX_5M = 120
+STOCK_MAX_15M = 80
+
+stock_candles_1m = {
+    s: deque(maxlen=STOCK_MAX_1M)
+    for s in STOCK_UNIVERSE
+}
+stock_candles_5m = {
+    s: deque(maxlen=STOCK_MAX_5M)
+    for s in STOCK_UNIVERSE
+}
+stock_candles_15m = {
+    s: deque(maxlen=STOCK_MAX_15M)
+    for s in STOCK_UNIVERSE
+}
+stock_active_1m = {s: None for s in STOCK_UNIVERSE}
+stock_active_5m = {s: None for s in STOCK_UNIVERSE}
+stock_active_15m = {s: None for s in STOCK_UNIVERSE}
+
+stock_signals: dict[str, dict[str, Any]] = {}
 
 option_oi_history: dict[str, dict[str, Any]] = {}
 
@@ -2335,6 +2410,8 @@ async def health():
                 for s in SIGNAL_SYMBOLS
             },
             "scanner_state": scanner_state,
+            "stock_universe_count": len(STOCK_UNIVERSE),
+            "stock_signal_count": len(stock_signals),
         },
         "persistence": persistence_status,
     }
@@ -2411,6 +2488,498 @@ async def force_state_save():
 
 
 # =========================================================
+# STOCK SCANNER — V7.1
+# =========================================================
+
+def _resolve_stock_sync(symbol: str):
+    """
+    Resolve the fixed symbol to its current NSE cash EQ token using Kotak.
+    No token is hard-coded, so broker master changes do not silently break it.
+    """
+    global neo_client
+
+    if neo_client is None:
+        raise RuntimeError("Authenticate first.")
+
+    response = neo_client.search_scrip(
+        exchange_segment="nse_cm",
+        symbol=symbol,
+        expiry="",
+        option_type="",
+        strike_price="",
+    )
+
+    rows = _normalise_rows(response)
+
+    wanted = str(symbol).upper().strip()
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        trading_symbol = str(
+            row.get("pTrdSymbol")
+            or row.get("trading_symbol")
+            or row.get("display_symbol")
+            or ""
+        ).upper().strip()
+
+        symbol_name = str(
+            row.get("pSymbolName")
+            or row.get("symbol")
+            or row.get("symbol_name")
+            or ""
+        ).upper().strip()
+
+        token = (
+            row.get("pSymbol")
+            or row.get("instrument_token")
+            or row.get("exchange_token")
+        )
+
+        inst_type = str(
+            row.get("pInstType")
+            or row.get("instrument_type")
+            or ""
+        ).upper().strip()
+
+        # Strong preference: exact NSE equity trading symbol.
+        exact_eq = trading_symbol == f"{wanted}-EQ"
+        exact_name = symbol_name == wanted
+
+        if (
+            token not in (None, "")
+            and (exact_eq or exact_name)
+            and inst_type not in {"OPTIDX", "FUTIDX", "OPTSTK", "FUTSTK"}
+        ):
+            return {
+                "symbol": wanted,
+                "instrument_token": str(token),
+                "exchange_segment": "nse_cm",
+                "trading_symbol": trading_symbol or f"{wanted}-EQ",
+            }
+
+    return None
+
+
+async def _resolve_stock_universe():
+    resolved = {}
+    unresolved = []
+
+    # Resolve sequentially to keep load predictable on the free backend.
+    for symbol in STOCK_UNIVERSE:
+        try:
+            item = await asyncio.to_thread(
+                _resolve_stock_sync,
+                symbol,
+            )
+            if item:
+                resolved[symbol] = item
+            else:
+                unresolved.append(symbol)
+        except Exception:
+            unresolved.append(symbol)
+
+    stock_token_map.clear()
+    stock_token_map.update(resolved)
+
+    scanner_state["stock_resolved"] = len(resolved)
+    scanner_state["stock_unresolved"] = len(unresolved)
+
+    return resolved, unresolved
+
+
+def _stock_snapshot(symbol):
+    one = list(stock_candles_1m[symbol])
+    five = list(stock_candles_5m[symbol])
+    fifteen = list(stock_candles_15m[symbol])
+
+    c1 = [c["close"] for c in one]
+    c5 = [c["close"] for c in five]
+    c15 = [c["close"] for c in fifteen]
+
+    return {
+        "one": {
+            "count": len(one),
+            "ema9": _ema(c1, 9),
+            "ema21": _ema(c1, 21),
+            "rsi14": _rsi(c1, 14),
+            "williams_r14": _williams_r(one, 14),
+            "price_action": _price_action(one),
+            "breakout": _breakout(one),
+            "atr14": _atr(one, 14),
+        },
+        "five": {
+            "count": len(five),
+            "ema9": _ema(c5, 9),
+            "ema21": _ema(c5, 21),
+            "ma20": _sma(c5, 20),
+            "rsi14": _rsi(c5, 14),
+            "price_action": _price_action(five),
+            "breakout": _breakout(five),
+        },
+        "fifteen": {
+            "count": len(fifteen),
+            "ema9": _ema(c15, 9),
+            "ema21": _ema(c15, 21),
+            "rsi14": _rsi(c15, 14),
+            "price_action": _price_action(fifteen),
+            "breakout": _breakout(fifteen),
+        },
+    }
+
+
+def _score_stock_direction(snapshot, direction):
+    one = snapshot["one"]
+    five = snapshot["five"]
+    fifteen = snapshot["fifteen"]
+
+    score = 0
+    reasons = []
+    blockers = []
+
+    # Warm-up: intentionally shorter than index option engine.
+    if one["count"] < 22:
+        blockers.append(f"1m warm-up {one['count']}/22")
+    if five["count"] < 9:
+        blockers.append(f"5m warm-up {five['count']}/9")
+    if fifteen["count"] < 3:
+        blockers.append(f"15m warm-up {fifteen['count']}/3")
+
+    bullish = direction == "BUY"
+
+    if fifteen["price_action"] == ("BULLISH" if bullish else "BEARISH"):
+        score += 20
+        reasons.append("15M price action")
+
+    if five["ema9"] is not None and five["ema21"] is not None:
+        ok = (
+            five["ema9"] > five["ema21"]
+            if bullish
+            else five["ema9"] < five["ema21"]
+        )
+        if ok:
+            score += 20
+            reasons.append("5M EMA 9/21")
+
+    if one["ema9"] is not None and one["ema21"] is not None:
+        ok = (
+            one["ema9"] > one["ema21"]
+            if bullish
+            else one["ema9"] < one["ema21"]
+        )
+        if ok:
+            score += 15
+            reasons.append("1M EMA 9/21")
+
+    if one["breakout"] == ("BULLISH" if bullish else "BEARISH"):
+        score += 20
+        reasons.append("1M breakout")
+
+    rsi = one["rsi14"]
+    if rsi is not None:
+        if bullish and 54 <= rsi <= 75:
+            score += 10
+            reasons.append("RSI bullish")
+        elif (not bullish) and 25 <= rsi <= 46:
+            score += 10
+            reasons.append("RSI bearish")
+
+    wr = one["williams_r14"]
+    if wr is not None:
+        if bullish and -55 <= wr <= -5:
+            score += 10
+            reasons.append("Williams %R bullish")
+        elif (not bullish) and -95 <= wr <= -45:
+            score += 10
+            reasons.append("Williams %R bearish")
+
+    if five["price_action"] == ("BULLISH" if bullish else "BEARISH"):
+        score += 5
+        reasons.append("5M price action")
+
+    return min(score, 100), reasons, blockers
+
+
+async def _evaluate_stock_signal(symbol):
+    snap = _stock_snapshot(symbol)
+
+    buy_score, buy_reasons, buy_blockers = _score_stock_direction(
+        snap, "BUY"
+    )
+    sell_score, sell_reasons, sell_blockers = _score_stock_direction(
+        snap, "SELL"
+    )
+
+    if buy_score >= sell_score:
+        direction = "BUY"
+        score = buy_score
+        reasons = buy_reasons
+        blockers = buy_blockers
+    else:
+        direction = "SELL"
+        score = sell_score
+        reasons = sell_reasons
+        blockers = sell_blockers
+
+    if blockers:
+        grade = "WARMING_UP"
+        actionable = False
+    elif score >= 80:
+        grade = "A+"
+        actionable = True
+    elif score >= 70:
+        grade = "STRONG"
+        actionable = True
+    elif score >= 60:
+        grade = "WATCH"
+        actionable = False
+    else:
+        grade = "NO_TRADE"
+        actionable = False
+
+    ltp = stock_latest.get(symbol, {}).get("ltp")
+    atr = snap["one"].get("atr14")
+
+    entry = stop = t1 = t2 = None
+
+    if actionable and ltp is not None:
+        entry = round(float(ltp), 2)
+
+        # ATR-based stock trade plan. If ATR is unavailable, stay non-actionable.
+        if atr is None or atr <= 0:
+            actionable = False
+            grade = "ATR_NOT_READY"
+            blockers = list(blockers) + ["ATR not ready"]
+        else:
+            risk = max(float(atr) * 1.2, entry * 0.003)
+            if direction == "BUY":
+                stop = round(entry - risk, 2)
+                t1 = round(entry + risk, 2)
+                t2 = round(entry + (2 * risk), 2)
+            else:
+                stop = round(entry + risk, 2)
+                t1 = round(entry - risk, 2)
+                t2 = round(entry - (2 * risk), 2)
+
+    signal = {
+        "symbol": symbol,
+        "direction": direction,
+        "score": score,
+        "grade": grade,
+        "actionable": actionable,
+        "ltp": ltp,
+        "entry": entry,
+        "stop_loss": stop,
+        "target_1": t1,
+        "target_2": t2,
+        "reasons": reasons,
+        "blockers": blockers,
+        "indicators": snap,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "mode": "STOCK_SIGNAL_ONLY",
+    }
+
+    stock_signals[symbol] = signal
+
+    await broadcast({
+        "type": "stock_signal_update",
+        "data": signal,
+    })
+
+
+async def _consume_stock_tick(symbol, price, received_at):
+    if not scanner_state.get("stock_scan_enabled"):
+        return
+
+    try:
+        epoch = int(
+            datetime.fromisoformat(
+                received_at.replace("Z", "+00:00")
+            ).timestamp()
+        )
+    except Exception:
+        epoch = int(datetime.now(timezone.utc).timestamp())
+
+    closed = False
+
+    for minutes, active, history in (
+        (1, stock_active_1m, stock_candles_1m),
+        (5, stock_active_5m, stock_candles_5m),
+        (15, stock_active_15m, stock_candles_15m),
+    ):
+        bucket = _bucket(epoch, minutes)
+        current = active[symbol]
+
+        if current is None:
+            active[symbol] = _new_candle(bucket, price)
+        elif current["ts"] == bucket:
+            _update_candle(current, price)
+        elif bucket > current["ts"]:
+            history[symbol].append(dict(current))
+            active[symbol] = _new_candle(bucket, price)
+            closed = True
+
+    if closed:
+        await _evaluate_stock_signal(symbol)
+
+
+def _stock_symbol_from_message(data):
+    token = str(
+        data.get("instrument_token")
+        or data.get("exchange_token")
+        or ""
+    )
+
+    trading_symbol = str(
+        data.get("trading_symbol")
+        or data.get("display_symbol")
+        or ""
+    ).upper()
+
+    for symbol, item in stock_token_map.items():
+        if token and token == item.get("instrument_token"):
+            return symbol
+
+        expected = str(item.get("trading_symbol") or "").upper()
+        if trading_symbol and expected and trading_symbol == expected:
+            return symbol
+
+    return None
+
+
+async def stock_feed_loop():
+    global neo_client
+
+    scanner_state["stock_scan_running"] = False
+    scanner_state["stock_last_error"] = None
+
+    if neo_client is None:
+        scanner_state["stock_last_error"] = "Authenticate first."
+        return
+
+    resolved, unresolved = await _resolve_stock_universe()
+
+    if not resolved:
+        scanner_state["stock_last_error"] = (
+            "No fixed-universe stock tokens could be resolved."
+        )
+        return
+
+    tokens = [
+        WsToken(
+            item["exchange_segment"],
+            item["instrument_token"],
+        )
+        for item in resolved.values()
+    ]
+
+    try:
+        async with neo_client.create_websocket() as ws:
+            await ws.subscribe_scrips(tokens)
+
+            scanner_state["stock_scan_running"] = True
+            scanner_state["stock_last_error"] = None
+
+            await broadcast({
+                "type": "stock_scanner_status",
+                "data": {
+                    "running": True,
+                    "resolved": len(resolved),
+                    "unresolved": unresolved,
+                },
+            })
+
+            async for message in ws:
+                if not scanner_state.get("stock_scan_enabled"):
+                    break
+
+                if not isinstance(message, SFeedScrip):
+                    continue
+
+                try:
+                    data = message.model_dump()
+                except Exception:
+                    data = {}
+
+                symbol = _stock_symbol_from_message(data)
+
+                if symbol is None:
+                    continue
+
+                ltp = (
+                    data.get("last_traded_price")
+                    or data.get("ltp")
+                    or data.get("last_price")
+                )
+
+                price = number(ltp)
+
+                if price is None or price <= 0:
+                    continue
+
+                now = datetime.now(timezone.utc).isoformat()
+
+                item = {
+                    "symbol": symbol,
+                    "trading_symbol": data.get("trading_symbol"),
+                    "instrument_token": data.get("instrument_token"),
+                    "ltp": price,
+                    "change": number(
+                        data.get("change")
+                        or data.get("net_change")
+                    ),
+                    "percent_change": number(
+                        data.get("percentage_change")
+                        or data.get("percent_change")
+                        or data.get("per_change")
+                    ),
+                    "received_at": now,
+                }
+
+                stock_latest[symbol] = item
+
+                await _consume_stock_tick(
+                    symbol,
+                    price,
+                    now,
+                )
+
+    except asyncio.CancelledError:
+        pass
+
+    except Exception as exc:
+        scanner_state["stock_last_error"] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    finally:
+        scanner_state["stock_scan_running"] = False
+
+        await broadcast({
+            "type": "stock_scanner_status",
+            "data": {
+                "running": False,
+                "last_error": scanner_state["stock_last_error"],
+            },
+        })
+
+
+def _best_stock_signals(limit=12):
+    rows = list(stock_signals.values())
+
+    rows.sort(
+        key=lambda x: (
+            bool(x.get("actionable")),
+            float(x.get("score") or 0),
+        ),
+        reverse=True,
+    )
+
+    return rows[:limit]
+
+
+# =========================================================
 # SCANNER CONTROLS — V7
 # =========================================================
 
@@ -2424,10 +2993,11 @@ async def scanners_status():
         "stocks": {
             "enabled": scanner_state["stock_scan_enabled"],
             "running": scanner_state["stock_scan_running"],
-            "note": (
-                "Stock universe subscription is not activated in V7 core yet. "
-                "Frontend controls are ready for the next stock-universe module."
-            ),
+            "resolved": scanner_state["stock_resolved"],
+            "unresolved": scanner_state["stock_unresolved"],
+            "last_error": scanner_state["stock_last_error"],
+            "universe_count": len(STOCK_UNIVERSE),
+            "universe": list(STOCK_UNIVERSE),
         },
     }
 
@@ -2446,24 +3016,81 @@ async def stop_index_scanner():
 
 @app.post("/api/scanners/stocks/start")
 async def start_stock_scanner():
+    global stock_feed_task
+
+    if neo_client is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Connect/authenticate first.",
+        )
+
     scanner_state["stock_scan_enabled"] = True
-    scanner_state["stock_scan_running"] = False
+
+    if stock_feed_task and not stock_feed_task.done():
+        return {
+            "ok": True,
+            "message": "Stock scanner is already running.",
+            "scanner_state": scanner_state,
+        }
+
+    stock_feed_task = asyncio.create_task(
+        stock_feed_loop()
+    )
+
     return {
-        "ok": False,
-        "scanner_state": scanner_state,
+        "ok": True,
         "message": (
-            "Stock scanner control is ready, but stock-universe market-data "
-            "subscription is intentionally not started until the approved "
-            "midcap/smallcap token universe is wired."
+            f"Stock scanner starting for fixed {len(STOCK_UNIVERSE)}-stock universe."
         ),
+        "scanner_state": scanner_state,
+        "universe": list(STOCK_UNIVERSE),
     }
 
 
 @app.post("/api/scanners/stocks/stop")
 async def stop_stock_scanner():
+    global stock_feed_task
+
     scanner_state["stock_scan_enabled"] = False
+
+    if stock_feed_task and not stock_feed_task.done():
+        stock_feed_task.cancel()
+
     scanner_state["stock_scan_running"] = False
-    return {"ok": True, "scanner_state": scanner_state}
+
+    return {
+        "ok": True,
+        "message": "Stock scanner stopped.",
+        "scanner_state": scanner_state,
+    }
+
+
+@app.get("/api/stocks/signals")
+async def get_stock_signals():
+    return {
+        "scanner": scanner_state,
+        "universe": list(STOCK_UNIVERSE),
+        "resolved_tokens": stock_token_map,
+        "latest": stock_latest,
+        "signals": stock_signals,
+        "best": _best_stock_signals(),
+    }
+
+
+@app.get("/api/stocks/signals/best")
+async def get_best_stock_signals(limit: int = 12):
+    safe_limit = max(1, min(int(limit), 40))
+
+    return {
+        "scanner": scanner_state,
+        "count": min(
+            safe_limit,
+            len(stock_signals),
+        ),
+        "items": _best_stock_signals(
+            safe_limit
+        ),
+    }
 
 
 # =========================================================
