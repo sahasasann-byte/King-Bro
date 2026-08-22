@@ -26,7 +26,7 @@ from config import settings
 
 app = FastAPI(
     title="King Bro Terminal API",
-    version="6.2.0",
+    version="7.0.0",
 )
 
 
@@ -93,6 +93,7 @@ feed_task: Optional[asyncio.Task] = None
 SIGNAL_SYMBOLS = ("NIFTY 50", "SENSEX")
 MAX_1M_CANDLES = 300
 MAX_5M_CANDLES = 200
+MAX_15M_CANDLES = 200
 
 candles_1m = {
     s: deque(maxlen=MAX_1M_CANDLES)
@@ -102,12 +103,25 @@ candles_5m = {
     s: deque(maxlen=MAX_5M_CANDLES)
     for s in SIGNAL_SYMBOLS
 }
+candles_15m = {
+    s: deque(maxlen=MAX_15M_CANDLES)
+    for s in SIGNAL_SYMBOLS
+}
 active_1m = {s: None for s in SIGNAL_SYMBOLS}
 active_5m = {s: None for s in SIGNAL_SYMBOLS}
+active_15m = {s: None for s in SIGNAL_SYMBOLS}
 
 signals: dict[str, dict[str, Any]] = {}
 
 signal_history = deque(maxlen=100)
+
+scanner_state = {
+    "index_scan_enabled": True,
+    "stock_scan_enabled": False,
+    "stock_scan_running": False,
+}
+
+option_oi_history: dict[str, dict[str, Any]] = {}
 
 # =========================================================
 # CANDLE PERSISTENCE / RESTORE — V6.1
@@ -167,12 +181,20 @@ def _serialisable_candle_state():
             symbol: list(candles_5m[symbol])
             for symbol in SIGNAL_SYMBOLS
         },
+        "candles_15m": {
+            symbol: list(candles_15m[symbol])
+            for symbol in SIGNAL_SYMBOLS
+        },
         "active_1m": {
             symbol: active_1m[symbol]
             for symbol in SIGNAL_SYMBOLS
         },
         "active_5m": {
             symbol: active_5m[symbol]
+            for symbol in SIGNAL_SYMBOLS
+        },
+        "active_15m": {
+            symbol: active_15m[symbol]
             for symbol in SIGNAL_SYMBOLS
         },
     }
@@ -220,9 +242,11 @@ def _restore_candle_state_sync():
         for symbol in SIGNAL_SYMBOLS:
             one = payload.get("candles_1m", {}).get(symbol, [])
             five = payload.get("candles_5m", {}).get(symbol, [])
+            fifteen = payload.get("candles_15m", {}).get(symbol, [])
 
             candles_1m[symbol].clear()
             candles_5m[symbol].clear()
+            candles_15m[symbol].clear()
 
             for candle in one[-MAX_1M_CANDLES:]:
                 if isinstance(candle, dict):
@@ -232,11 +256,17 @@ def _restore_candle_state_sync():
                 if isinstance(candle, dict):
                     candles_5m[symbol].append(candle)
 
+            for candle in fifteen[-MAX_15M_CANDLES:]:
+                if isinstance(candle, dict):
+                    candles_15m[symbol].append(candle)
+
             a1 = payload.get("active_1m", {}).get(symbol)
             a5 = payload.get("active_5m", {}).get(symbol)
+            a15 = payload.get("active_15m", {}).get(symbol)
 
             active_1m[symbol] = a1 if isinstance(a1, dict) else None
             active_5m[symbol] = a5 if isinstance(a5, dict) else None
+            active_15m[symbol] = a15 if isinstance(a15, dict) else None
 
         persistence_status["restored"] = True
         persistence_status["last_error"] = None
@@ -563,9 +593,11 @@ def _price_vs_levels(price, levels):
 def _indicator_snapshot(symbol):
     one = list(candles_1m[symbol])
     five = list(candles_5m[symbol])
+    fifteen = list(candles_15m[symbol])
 
     c1 = [c["close"] for c in one]
     c5 = [c["close"] for c in five]
+    c15 = [c["close"] for c in fifteen]
 
     daily = _refresh_daily_levels(symbol)
     five_pivot = _five_minute_pivot(five)
@@ -590,6 +622,15 @@ def _indicator_snapshot(symbol):
             "ma20": _sma(c5, 20),
             "rsi14": _rsi(c5, 14),
             "price_action": _price_action(five),
+        },
+        "fifteen_minute": {
+            "count": len(fifteen),
+            "ema9": _ema(c15, 9),
+            "ema21": _ema(c15, 21),
+            "ma20": _sma(c15, 20),
+            "rsi14": _rsi(c15, 14),
+            "price_action": _price_action(fifteen),
+            "breakout": _breakout(fifteen),
         },
         "daily_levels": daily,
         "daily_level_context": _price_vs_levels(
@@ -626,6 +667,7 @@ def _indicator_snapshot(symbol):
 def _direction_score(snapshot, direction):
     one = snapshot["one_minute"]
     five = snapshot["five_minute"]
+    fifteen = snapshot["fifteen_minute"]
 
     score = 0
     reasons = []
@@ -636,10 +678,26 @@ def _direction_score(snapshot, direction):
         blockers.append(f"1m warm-up {one['count']}/22")
     if five["count"] < 21:
         blockers.append(f"5m warm-up {five['count']}/21")
+    if fifteen["count"] < 9:
+        blockers.append(f"15m warm-up {fifteen['count']}/9")
 
     if five["price_action"] == direction:
         score += 20
         reasons.append("5M price action")
+
+    if fifteen["price_action"] == direction:
+        score += 10
+        reasons.append("15M higher-timeframe price action")
+
+    if fifteen["ema9"] is not None and fifteen["ema21"] is not None:
+        ok15 = (
+            fifteen["ema9"] > fifteen["ema21"]
+            if direction == "BULLISH"
+            else fifteen["ema9"] < fifteen["ema21"]
+        )
+        if ok15:
+            score += 10
+            reasons.append("15M EMA 9/21 higher-timeframe confirmation")
 
     if five["ema9"] is not None and five["ema21"] is not None:
         ok = (
@@ -724,6 +782,57 @@ def _direction_score(snapshot, direction):
     return score, reasons, blockers
 
 
+
+def _classify_option_oi(display_symbol, ltp, oi):
+    if not display_symbol or ltp is None or oi is None:
+        return {
+            "ready": False,
+            "classification": "UNKNOWN",
+            "oi_change": None,
+            "price_change": None,
+        }
+
+    key = str(display_symbol)
+    prev = option_oi_history.get(key)
+
+    current = {
+        "ltp": float(ltp),
+        "oi": float(oi),
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    option_oi_history[key] = current
+
+    if not prev:
+        return {
+            "ready": False,
+            "classification": "BASELINE_CAPTURED",
+            "oi_change": None,
+            "price_change": None,
+        }
+
+    oi_change = current["oi"] - float(prev["oi"])
+    price_change = current["ltp"] - float(prev["ltp"])
+
+    if oi_change > 0 and price_change > 0:
+        cls = "LONG_BUILDUP"
+    elif oi_change > 0 and price_change < 0:
+        cls = "SHORT_BUILDUP"
+    elif oi_change < 0 and price_change > 0:
+        cls = "SHORT_COVERING"
+    elif oi_change < 0 and price_change < 0:
+        cls = "LONG_UNWINDING"
+    else:
+        cls = "FLAT"
+
+    return {
+        "ready": True,
+        "classification": cls,
+        "oi_change": round(oi_change, 2),
+        "price_change": round(price_change, 2),
+        "previous": prev,
+        "current": current,
+    }
+
 def _option_trade_plan(option_ltp, option_data):
     """
     Conservative signal-only trade plan derived from the selected option LTP.
@@ -796,6 +905,11 @@ async def _attach_auto_option_to_signal(signal):
         signal["option_ltp"] = option_ltp
         signal["option_intelligence"] = quote
         signal["option_quality_score"] = liquidity_score
+        signal["oi_intelligence"] = _classify_option_oi(
+            selected.get("trading_symbol"),
+            option_ltp,
+            oi,
+        )
         signal["option_quality_pass"] = (
             option_ltp is not None
             and option_ltp > 0
@@ -912,6 +1026,9 @@ async def consume_signal_tick(symbol, price, received_at):
     if symbol not in SIGNAL_SYMBOLS:
         return
 
+    if not scanner_state.get("index_scan_enabled", True):
+        return
+
     try:
         epoch = int(
             datetime.fromisoformat(
@@ -926,6 +1043,7 @@ async def consume_signal_tick(symbol, price, received_at):
     for minutes, active, history in (
         (1, active_1m, candles_1m),
         (5, active_5m, candles_5m),
+        (15, active_15m, candles_15m),
     ):
         bucket = _bucket(epoch, minutes)
         current = active[symbol]
@@ -2212,6 +2330,11 @@ async def health():
                 s: len(candles_5m[s])
                 for s in SIGNAL_SYMBOLS
             },
+            "fifteen_minute_candles": {
+                s: len(candles_15m[s])
+                for s in SIGNAL_SYMBOLS
+            },
+            "scanner_state": scanner_state,
         },
         "persistence": persistence_status,
     }
@@ -2267,8 +2390,13 @@ async def state_diagnostics():
                 s: len(candles_5m[s])
                 for s in SIGNAL_SYMBOLS
             },
+            "fifteen_minute_candles": {
+                s: len(candles_15m[s])
+                for s in SIGNAL_SYMBOLS
+            },
             "active_1m": active_1m,
             "active_5m": active_5m,
+            "active_15m": active_15m,
         },
     }
 
@@ -2280,6 +2408,62 @@ async def force_state_save():
         "ok": persistence_status.get("last_error") is None,
         "persistence": persistence_status,
     }
+
+
+# =========================================================
+# SCANNER CONTROLS — V7
+# =========================================================
+
+@app.get("/api/scanners")
+async def scanners_status():
+    return {
+        "index": {
+            "enabled": scanner_state["index_scan_enabled"],
+            "symbols": list(SIGNAL_SYMBOLS),
+        },
+        "stocks": {
+            "enabled": scanner_state["stock_scan_enabled"],
+            "running": scanner_state["stock_scan_running"],
+            "note": (
+                "Stock universe subscription is not activated in V7 core yet. "
+                "Frontend controls are ready for the next stock-universe module."
+            ),
+        },
+    }
+
+
+@app.post("/api/scanners/index/start")
+async def start_index_scanner():
+    scanner_state["index_scan_enabled"] = True
+    return {"ok": True, "scanner_state": scanner_state}
+
+
+@app.post("/api/scanners/index/stop")
+async def stop_index_scanner():
+    scanner_state["index_scan_enabled"] = False
+    return {"ok": True, "scanner_state": scanner_state}
+
+
+@app.post("/api/scanners/stocks/start")
+async def start_stock_scanner():
+    scanner_state["stock_scan_enabled"] = True
+    scanner_state["stock_scan_running"] = False
+    return {
+        "ok": False,
+        "scanner_state": scanner_state,
+        "message": (
+            "Stock scanner control is ready, but stock-universe market-data "
+            "subscription is intentionally not started until the approved "
+            "midcap/smallcap token universe is wired."
+        ),
+    }
+
+
+@app.post("/api/scanners/stocks/stop")
+async def stop_stock_scanner():
+    scanner_state["stock_scan_enabled"] = False
+    scanner_state["stock_scan_running"] = False
+    return {"ok": True, "scanner_state": scanner_state}
 
 
 # =========================================================
@@ -2446,6 +2630,7 @@ async def get_signal(symbol: str):
         "indicators": _indicator_snapshot(key),
         "one_minute_candles": list(candles_1m[key])[-50:],
         "five_minute_candles": list(candles_5m[key])[-50:],
+        "fifteen_minute_candles": list(candles_15m[key])[-50:],
     }
 
 
