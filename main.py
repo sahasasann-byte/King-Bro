@@ -23,7 +23,7 @@ from config import settings
 
 app = FastAPI(
     title="King Bro Terminal API",
-    version="5.5.0",
+    version="6.0.0",
 )
 
 
@@ -268,8 +268,17 @@ def _indicator_snapshot(symbol):
             "reason": "Depth/order-flow module not enabled yet.",
         },
         "options": {
-            "ready": False,
-            "reason": "Option LTP/OI/Greeks/VIX come in the next module.",
+            "ready": neo_client is not None,
+            "mode": "AUTO_ATM_NEAREST_EXPIRY",
+            "inputs": [
+                "Kotak option LTP",
+                "open interest",
+                "liquidity score",
+            ],
+            "note": (
+                "Greeks and India VIX are not used until dedicated "
+                "validated inputs are wired."
+            ),
         },
     }
 
@@ -341,6 +350,109 @@ def _direction_score(snapshot, direction):
     return score, reasons, blockers
 
 
+def _option_trade_plan(option_ltp, option_data):
+    """
+    Conservative signal-only trade plan derived from the selected option LTP.
+    No order is placed. Levels are rounded to 0.05.
+    """
+    if option_ltp is None or option_ltp <= 0:
+        return None
+
+    def tick(x):
+        return round(round(float(x) / 0.05) * 0.05, 2)
+
+    # ATR for the option is not available yet, so use percentage risk levels.
+    # These are presentation/risk-plan levels, not guaranteed outcomes.
+    entry = tick(option_ltp)
+    stop = tick(option_ltp * 0.85)
+    risk = max(entry - stop, 0.05)
+    t1 = tick(entry + risk)
+    t2 = tick(entry + (risk * 2))
+
+    return {
+        "entry": entry,
+        "stop_loss": stop,
+        "target_1": t1,
+        "target_2": t2,
+        "risk_per_unit": tick(risk),
+        "rr_target_1": "1:1",
+        "rr_target_2": "1:2",
+        "basis": "selected option LTP; 15% signal-only risk model",
+    }
+
+
+async def _attach_auto_option_to_signal(signal):
+    """
+    For a technically actionable CALL/PUT signal, automatically discover
+    the nearest-expiry ATM option and attach live Kotak option intelligence.
+    """
+    if not signal.get("actionable"):
+        return signal
+
+    try:
+        discovery = await auto_discover_option(
+            signal["symbol"],
+            signal["direction"],
+        )
+
+        signal["option_discovery"] = discovery
+
+        if not discovery.get("ready"):
+            signal["actionable"] = False
+            signal["grade"] = "OPTION_NOT_READY"
+            signal["blockers"] = list(signal.get("blockers", [])) + [
+                discovery.get("reason", "Option discovery not ready.")
+            ]
+            return signal
+
+        selected = discovery["selected"]
+        quote = selected.get("quote") or {}
+        option_ltp = quote.get("ltp")
+        liquidity_score = quote.get("liquidity_score") or 0
+        oi = quote.get("open_interest")
+
+        signal["option_contract"] = {
+            "instrument_token": selected.get("instrument_token"),
+            "exchange_segment": discovery.get("exchange_segment"),
+            "display_symbol": selected.get("trading_symbol"),
+            "expiry": selected.get("expiry"),
+            "strike_price": selected.get("strike_price"),
+            "option_type": selected.get("option_type"),
+        }
+        signal["option_ltp"] = option_ltp
+        signal["option_intelligence"] = quote
+        signal["option_quality_score"] = liquidity_score
+        signal["option_quality_pass"] = (
+            option_ltp is not None
+            and option_ltp > 0
+            and oi is not None
+            and oi > 0
+            and liquidity_score >= 60
+        )
+
+        if not signal["option_quality_pass"]:
+            signal["actionable"] = False
+            signal["grade"] = "OPTION_FILTER"
+            signal["blockers"] = list(signal.get("blockers", [])) + [
+                "Selected option failed LTP/OI/liquidity confirmation."
+            ]
+            return signal
+
+        plan = _option_trade_plan(option_ltp, quote)
+        if plan:
+            signal.update(plan)
+
+        return signal
+
+    except Exception as exc:
+        signal["actionable"] = False
+        signal["grade"] = "OPTION_ERROR"
+        signal["blockers"] = list(signal.get("blockers", [])) + [
+            f"Auto option confirmation failed: {type(exc).__name__}: {exc}"
+        ]
+        return signal
+
+
 async def _evaluate_signal(symbol):
     snap = _indicator_snapshot(symbol)
 
@@ -397,6 +509,10 @@ async def _evaluate_signal(symbol):
         "target_1": None,
         "target_2": None,
     }
+
+    # V6: Technical signal first; real option confirmation only when
+    # the technical setup is actionable. This keeps REST load controlled.
+    signal = await _attach_auto_option_to_signal(signal)
 
     previous = signals.get(symbol)
     signals[symbol] = signal
@@ -1881,7 +1997,7 @@ async def get_signal(symbol: str):
     if not key:
         raise HTTPException(
             status_code=404,
-            detail="V1 signal engine scans only NIFTY 50 and SENSEX.",
+            detail="V6 signal engine scans only NIFTY 50 and SENSEX.",
         )
 
     return {
