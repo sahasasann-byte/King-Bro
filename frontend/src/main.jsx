@@ -7,6 +7,9 @@ import {
   Wifi,
   WifiOff,
   LockKeyhole,
+  Zap,
+  Radio,
+  CircleDot
 } from "lucide-react";
 import "./styles.css";
 
@@ -15,7 +18,7 @@ const WS_URL = API.replace(/^http/, "ws") + "/ws/market";
 
 const EMPTY = {
   "NIFTY 50": { key: "NIFTY 50", ltp: null },
-  SENSEX: { key: "SENSEX", ltp: null },
+  "SENSEX": { key: "SENSEX", ltp: null },
   "BANK NIFTY": { key: "BANK NIFTY", ltp: null },
 };
 
@@ -36,6 +39,7 @@ function formatNumber(value) {
 
 function MarketCard({ item }) {
   const pct = item.percent_change;
+  const change = item.change;
 
   const isDown =
     pct !== null &&
@@ -44,18 +48,17 @@ function MarketCard({ item }) {
 
   return (
     <div className="market-card glass">
+      <div className="card-shine" />
+
       <div className="market-title">
         <div>
           <h3>{item.key}</h3>
-
-          <small>
-            {item.key === "SENSEX" ? "BSE" : "NSE"}
-          </small>
+          <small>{item.key === "SENSEX" ? "BSE" : "NSE"}</small>
         </div>
 
-        <Activity
-          className={isDown ? "down" : "up"}
-        />
+        <div className={`pulse-icon ${isDown ? "down" : "up"}`}>
+          <Activity />
+        </div>
       </div>
 
       <div className="market-price">
@@ -69,20 +72,18 @@ function MarketCard({ item }) {
             : "market-change up"
         }
       >
-        {item.change == null
+        {change == null
           ? "Waiting for Kotak live tick"
           : `${isDown ? "▼" : "▲"} ${formatNumber(
-              Math.abs(item.change)
+              Math.abs(change)
             )}${
               pct == null
                 ? ""
-                : ` (${
-                    isDown ? "" : "+"
-                  }${formatNumber(pct)}%)`
+                : ` (${isDown ? "" : "+"}${formatNumber(pct)}%)`
             }`}
       </div>
 
-      <div className="real-feed-line">
+      <div className="mini-wave">
         <span />
       </div>
 
@@ -189,27 +190,21 @@ function App() {
     event.preventDefault();
 
     if (!/^\d{6}$/.test(totp)) {
-      setMessage(
-        "Enter the current 6-digit TOTP."
-      );
+      setMessage("Enter the current 6-digit TOTP.");
       return;
     }
 
     setBusy(true);
-    setMessage(
-      "Authenticating with Kotak Neo..."
-    );
+    setMessage("Authenticating with Kotak Neo...");
 
     try {
       const response = await fetch(
         API + "/api/kotak/connect",
         {
           method: "POST",
-
           headers: {
             "Content-Type": "application/json",
           },
-
           body: JSON.stringify({
             totp,
           }),
@@ -223,10 +218,8 @@ function App() {
 
         throw new Error(
           typeof detail === "object"
-            ? detail.message ||
-                JSON.stringify(detail)
-            : detail ||
-                "Kotak connection failed"
+            ? detail.message || JSON.stringify(detail)
+            : detail || "Kotak connection failed"
         );
       }
 
@@ -246,32 +239,41 @@ function App() {
 
   return (
     <div className="page">
+
+      <div className="ambient-lights">
+        <span className="light light1" />
+        <span className="light light2" />
+        <span className="light light3" />
+      </div>
+
+      <div className="grid-overlay" />
+
       <aside className="sidebar glass">
         <div className="brand">
-          <Crown />
+          <div className="brand-icon">
+            <Crown />
+          </div>
 
           <h2>KING</h2>
-
-          <h2 className="bro">
-            BRO
-          </h2>
-
-          <span>
-            TERMINAL
-          </span>
+          <h2 className="bro">BRO</h2>
+          <span>TERMINAL</span>
         </div>
 
         <nav>
           <div className="nav active">
             <LayoutDashboard />
-
             Dashboard
           </div>
 
           <div className="nav">
             <Activity />
-
             Live Market
+          </div>
+
+          <div className="nav disabled">
+            <Zap />
+            Strategies
+            <span className="soon">SOON</span>
           </div>
         </nav>
 
@@ -289,30 +291,22 @@ function App() {
                 : "DISCONNECTED"}
             </b>
 
-            <small>
-              Kotak Neo SFeed
-            </small>
-
-            <small>
-              No mock data
-            </small>
+            <small>Kotak Neo SFeed</small>
+            <small>No mock data</small>
           </div>
         </div>
       </aside>
 
       <main>
+
         <header>
           <div>
             <h1>
-              King Bro{" "}
-              <span>
-                Terminal
-              </span>
+              King Bro <span>Terminal</span>
             </h1>
 
             <p>
-              Real Market Data • Kotak Neo •
-              No Mock Prices
+              Real Market Data • Kotak Neo • No Mock Prices
             </p>
           </div>
 
@@ -323,10 +317,8 @@ function App() {
                 : "live-pill off"
             }
           >
-            ●{" "}
-            {status.feed_connected
-              ? "LIVE"
-              : "OFFLINE"}
+            <CircleDot />
+            {status.feed_connected ? "LIVE" : "OFFLINE"}
           </div>
         </header>
 
@@ -339,14 +331,11 @@ function App() {
               <LockKeyhole />
 
               <div>
-                <h3>
-                  Morning Kotak Login
-                </h3>
+                <h3>Morning Kotak Login</h3>
 
                 <p>
-                  Consumer Key, Mobile,
-                  UCC and MPIN are already
-                  stored on the backend.
+                  Consumer Key, Mobile, UCC and MPIN are already stored
+                  on the backend.
                 </p>
               </div>
             </div>
@@ -369,9 +358,7 @@ function App() {
               />
             </label>
 
-            <button
-              disabled={busy}
-            >
+            <button disabled={busy}>
               {busy
                 ? "CONNECTING..."
                 : "CONNECT LIVE DATA"}
@@ -380,25 +367,16 @@ function App() {
         )}
 
         <section className="cards">
-          <MarketCard
-            item={feed["NIFTY 50"]}
-          />
-
-          <MarketCard
-            item={feed["SENSEX"]}
-          />
-
-          <MarketCard
-            item={feed["BANK NIFTY"]}
-          />
+          <MarketCard item={feed["NIFTY 50"]} />
+          <MarketCard item={feed["SENSEX"]} />
+          <MarketCard item={feed["BANK NIFTY"]} />
         </section>
 
         <section className="overview glass">
+
           <div className="overview-head">
             <div>
-              <h3>
-                Live Market Monitor
-              </h3>
+              <h3>Live Market Monitor</h3>
 
               <small
                 className={
@@ -413,34 +391,35 @@ function App() {
                   : "Waiting for live feed"}
               </small>
             </div>
+
+            <div className="live-badge">
+              <Radio />
+              REAL-TIME
+            </div>
           </div>
 
           <div className="monitor">
+
+            <div className="monitor-orb">
+              <Activity />
+            </div>
+
             {status.feed_connected ? (
               <>
-                <Activity />
-
                 <b>
-                  Real-time ticks are
-                  arriving from Kotak Neo.
+                  Real-time ticks are arriving from Kotak Neo.
                 </b>
 
                 <span>
-                  NIFTY 50 • SENSEX • BANK
-                  NIFTY
+                  NIFTY 50 • SENSEX • BANK NIFTY
                 </span>
               </>
             ) : (
               <>
-                <WifiOff />
-
-                <b>
-                  No live market tick received.
-                </b>
+                <b>No live market tick received.</b>
 
                 <span>
-                  Enter the current TOTP above
-                  to start the Kotak session.
+                  Enter the current TOTP above to start the Kotak session.
                 </span>
               </>
             )}
@@ -454,6 +433,7 @@ function App() {
             ? ` • ${status.last_error}`
             : ""}
         </div>
+
       </main>
     </div>
   );
