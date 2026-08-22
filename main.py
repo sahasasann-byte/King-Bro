@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from neo_api_client import NeoAPI
 from neo_api_client.websocket.feed import WsToken, SFeedScrip
-from app.config import settings
+from config import settings
 
 app=FastAPI(title="King Bro Terminal API", version="4.0.0")
 app.add_middleware(CORSMiddleware,allow_origins=[settings.FRONTEND_URL],allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
