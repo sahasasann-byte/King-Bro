@@ -26,7 +26,7 @@ from config import settings
 
 app = FastAPI(
     title="King Bro Terminal API",
-    version="6.1.0",
+    version="6.2.0",
 )
 
 
@@ -137,16 +137,18 @@ persistence_status = {
 # Latest inspected option intelligence, keyed by "exchange|token".
 option_intelligence: dict[str, dict[str, Any]] = {}
 
-# Daily CPR/Fib Pivot is intentionally not fabricated.
-# It needs previous-day High/Low/Close bootstrap, which will be wired
-# in the next module together with option data.
+# Daily CPR/Fib Pivot cache — V6.2.
+# Values are calculated only from completed real candles already collected.
 daily_levels = {
     s: {
         "ready": False,
         "pivot": None,
         "cpr": None,
+        "classic": None,
         "fib": None,
-        "reason": "Previous-day H/L/C bootstrap not connected yet.",
+        "reference_session": None,
+        "source": None,
+        "reason": "Need completed candles spanning at least two UTC sessions.",
     }
     for s in SIGNAL_SYMBOLS
 }
@@ -357,12 +359,217 @@ def _update_candle(candle, price):
     candle["ticks"] += 1
 
 
+
+def _session_key_from_candle(candle):
+    ts = candle.get("ts")
+    if ts is None:
+        return None
+    try:
+        return datetime.fromtimestamp(
+            float(ts), tz=timezone.utc
+        ).date().isoformat()
+    except Exception:
+        return None
+
+
+def _previous_session_hlc(candles):
+    """
+    Derive previous completed session H/L/C from real stored candles.
+    Current session is excluded. No synthetic previous-day values.
+    """
+    sessions = {}
+
+    for candle in candles:
+        day = _session_key_from_candle(candle)
+        if day is None:
+            continue
+        sessions.setdefault(day, []).append(candle)
+
+    if len(sessions) < 2:
+        return None
+
+    days = sorted(sessions)
+    previous_day = days[-2]
+    rows = sessions[previous_day]
+
+    highs = [number(c.get("high")) for c in rows]
+    lows = [number(c.get("low")) for c in rows]
+    closes = [number(c.get("close")) for c in rows]
+
+    highs = [x for x in highs if x is not None]
+    lows = [x for x in lows if x is not None]
+    closes = [x for x in closes if x is not None]
+
+    if not highs or not lows or not closes:
+        return None
+
+    return {
+        "session": previous_day,
+        "high": max(highs),
+        "low": min(lows),
+        "close": closes[-1],
+        "candle_count": len(rows),
+    }
+
+
+def _pivot_levels(high, low, close):
+    h = number(high)
+    l = number(low)
+    c = number(close)
+
+    if h is None or l is None or c is None or h < l:
+        return None
+
+    pivot = (h + l + c) / 3.0
+    bc_raw = (h + l) / 2.0
+    tc_raw = (2.0 * pivot) - bc_raw
+    bottom = min(bc_raw, tc_raw)
+    top = max(bc_raw, tc_raw)
+    rng = h - l
+
+    return {
+        "pivot": round(pivot, 2),
+        "cpr": {
+            "bc": round(bottom, 2),
+            "pivot": round(pivot, 2),
+            "tc": round(top, 2),
+            "width": round(top - bottom, 2),
+        },
+        "classic": {
+            "r1": round((2.0 * pivot) - l, 2),
+            "s1": round((2.0 * pivot) - h, 2),
+        },
+        "fib": {
+            "r1": round(pivot + 0.382 * rng, 2),
+            "r2": round(pivot + 0.618 * rng, 2),
+            "r3": round(pivot + rng, 2),
+            "s1": round(pivot - 0.382 * rng, 2),
+            "s2": round(pivot - 0.618 * rng, 2),
+            "s3": round(pivot - rng, 2),
+        },
+    }
+
+
+def _refresh_daily_levels(symbol):
+    reference = _previous_session_hlc(
+        list(candles_1m[symbol])
+    )
+
+    if reference is None:
+        daily_levels[symbol] = {
+            "ready": False,
+            "pivot": None,
+            "cpr": None,
+            "classic": None,
+            "fib": None,
+            "reference_session": None,
+            "source": None,
+            "reason": (
+                "Need completed real 1m candles spanning at least "
+                "two UTC sessions."
+            ),
+        }
+        return daily_levels[symbol]
+
+    levels = _pivot_levels(
+        reference["high"],
+        reference["low"],
+        reference["close"],
+    )
+
+    if levels is None:
+        return daily_levels[symbol]
+
+    daily_levels[symbol] = {
+        "ready": True,
+        **levels,
+        "reference_session": reference["session"],
+        "source": {
+            "high": round(reference["high"], 2),
+            "low": round(reference["low"], 2),
+            "close": round(reference["close"], 2),
+            "candle_count": reference["candle_count"],
+        },
+        "reason": None,
+    }
+
+    return daily_levels[symbol]
+
+
+def _five_minute_pivot(five):
+    """
+    Intraday context from the last completed 5m candle.
+    This is not a replacement for previous-day CPR.
+    """
+    if not five:
+        return {
+            "ready": False,
+            "reason": "No completed 5m candle yet.",
+        }
+
+    c = five[-1]
+    levels = _pivot_levels(
+        c.get("high"),
+        c.get("low"),
+        c.get("close"),
+    )
+
+    if levels is None:
+        return {
+            "ready": False,
+            "reason": "Last completed 5m candle is invalid.",
+        }
+
+    return {
+        "ready": True,
+        **levels,
+        "source_candle_ts": c.get("ts"),
+    }
+
+
+def _price_vs_levels(price, levels):
+    p = number(price)
+
+    if p is None or not levels or not levels.get("ready"):
+        return {
+            "ready": False,
+            "cpr_position": "UNKNOWN",
+            "fib_position": "UNKNOWN",
+        }
+
+    cpr = levels["cpr"]
+    fib = levels["fib"]
+
+    if p > cpr["tc"]:
+        cpr_position = "ABOVE_CPR"
+    elif p < cpr["bc"]:
+        cpr_position = "BELOW_CPR"
+    else:
+        cpr_position = "INSIDE_CPR"
+
+    if p >= fib["r1"]:
+        fib_position = "ABOVE_R1"
+    elif p <= fib["s1"]:
+        fib_position = "BELOW_S1"
+    else:
+        fib_position = "BETWEEN_S1_R1"
+
+    return {
+        "ready": True,
+        "cpr_position": cpr_position,
+        "fib_position": fib_position,
+    }
+
 def _indicator_snapshot(symbol):
     one = list(candles_1m[symbol])
     five = list(candles_5m[symbol])
 
     c1 = [c["close"] for c in one]
     c5 = [c["close"] for c in five]
+
+    daily = _refresh_daily_levels(symbol)
+    five_pivot = _five_minute_pivot(five)
+    current_price = latest.get(symbol, {}).get("ltp")
 
     return {
         "symbol": symbol,
@@ -384,7 +591,14 @@ def _indicator_snapshot(symbol):
             "rsi14": _rsi(c5, 14),
             "price_action": _price_action(five),
         },
-        "daily_levels": daily_levels[symbol],
+        "daily_levels": daily,
+        "daily_level_context": _price_vs_levels(
+            current_price, daily
+        ),
+        "five_minute_levels": five_pivot,
+        "five_minute_level_context": _price_vs_levels(
+            current_price, five_pivot
+        ),
         "vwap": {
             "ready": False,
             "reason": "True index VWAP needs usable traded volume; not fabricated.",
@@ -472,6 +686,40 @@ def _direction_score(snapshot, direction):
     if one["price_action"] == direction:
         score += 10
         reasons.append("1M price action")
+
+    daily_ctx = snapshot.get("daily_level_context") or {}
+    if daily_ctx.get("ready"):
+        cpr_pos = daily_ctx.get("cpr_position")
+        fib_pos = daily_ctx.get("fib_position")
+
+        if direction == "BULLISH":
+            if cpr_pos == "ABOVE_CPR":
+                score += 5
+                reasons.append("Above daily CPR")
+            if fib_pos == "ABOVE_R1":
+                score += 5
+                reasons.append("Above daily Fib R1")
+        else:
+            if cpr_pos == "BELOW_CPR":
+                score += 5
+                reasons.append("Below daily CPR")
+            if fib_pos == "BELOW_S1":
+                score += 5
+                reasons.append("Below daily Fib S1")
+
+    five_ctx = snapshot.get("five_minute_level_context") or {}
+    if five_ctx.get("ready"):
+        cpr_pos = five_ctx.get("cpr_position")
+
+        if direction == "BULLISH" and cpr_pos == "ABOVE_CPR":
+            score += 5
+            reasons.append("Above 5M pivot CPR")
+        elif direction == "BEARISH" and cpr_pos == "BELOW_CPR":
+            score += 5
+            reasons.append("Below 5M pivot CPR")
+
+    # Preserve the original 0-100 public score scale.
+    score = min(score, 100)
 
     return score, reasons, blockers
 
@@ -1970,8 +2218,40 @@ async def health():
 
 
 
+@app.get("/api/levels/{symbol}")
+async def market_levels(symbol: str):
+    key = symbol.strip().upper().replace("_", " ")
+
+    aliases = {
+        "NIFTY": "NIFTY 50",
+        "NIFTY50": "NIFTY 50",
+        "NIFTY 50": "NIFTY 50",
+        "SENSEX": "SENSEX",
+    }
+
+    resolved = aliases.get(key)
+
+    if resolved not in SIGNAL_SYMBOLS:
+        raise HTTPException(
+            status_code=404,
+            detail="Supported symbols: NIFTY or SENSEX.",
+        )
+
+    snap = _indicator_snapshot(resolved)
+
+    return {
+        "symbol": resolved,
+        "underlying_ltp": latest.get(resolved, {}).get("ltp"),
+        "daily_levels": snap["daily_levels"],
+        "daily_context": snap["daily_level_context"],
+        "five_minute_levels": snap["five_minute_levels"],
+        "five_minute_context": snap["five_minute_level_context"],
+        "mock_data": False,
+    }
+
+
 # =========================================================
-# STATE DIAGNOSTICS — V6.1
+# STATE DIAGNOSTICS — V6.2
 # =========================================================
 
 @app.get("/api/state")
