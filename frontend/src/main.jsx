@@ -28,7 +28,7 @@ function MarketMini({ item }) {
   const ch = Number(item?.change || 0);
   const up = ch >= 0;
   return (
-    <div className="mini-market glass-card">
+    <div className={`mini-market glass-card ${item?.received_at ? "tick-flash" : ""}`}>
       <div className="mini-label">{item.key}</div>
       <div className="mini-ltp">{n(item.ltp)}</div>
       <div className={`mini-change ${up ? "pos" : "neg"}`}>
@@ -445,6 +445,25 @@ function App() {
   const [orderDraft,setOrderDraft] = React.useState(null);
   const [orderBusy,setOrderBusy] = React.useState(false);
 
+  const [activeSection,setActiveSection] = React.useState("dashboard");
+
+  const sectionRefs = {
+    dashboard: React.useRef(null),
+    index: React.useRef(null),
+    stocks: React.useRef(null),
+    signals: React.useRef(null),
+    positions: React.useRef(null),
+    settings: React.useRef(null),
+  };
+
+  function goTo(section) {
+    setActiveSection(section);
+    sectionRefs[section]?.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  }
+
   const loadScanners = React.useCallback(async()=>{
     try {
       let r = await fetch(API+"/api/scanners/status");
@@ -639,12 +658,12 @@ function App() {
         </div>
 
         <nav className="top-nav">
-          <button className="active"><Home size={16}/>Dashboard</button>
-          <button><Crosshair size={16}/>Index Scan</button>
-          <button><ScanLine size={16}/>Stock Scan</button>
-          <button><Zap size={16}/>Signals</button>
-          <button><BriefcaseBusiness size={16}/>Positions</button>
-          <button><Settings size={16}/>Settings</button>
+          <button className={activeSection==="dashboard"?"active":""} onClick={()=>goTo("dashboard")}><Home size={16}/>Dashboard</button>
+          <button className={activeSection==="index"?"active":""} onClick={()=>goTo("index")}><Crosshair size={16}/>Index Scan</button>
+          <button className={activeSection==="stocks"?"active":""} onClick={()=>goTo("stocks")}><ScanLine size={16}/>Stock Scan</button>
+          <button className={activeSection==="signals"?"active":""} onClick={()=>goTo("signals")}><Zap size={16}/>Signals</button>
+          <button className={activeSection==="positions"?"active":""} onClick={()=>goTo("positions")}><BriefcaseBusiness size={16}/>Positions</button>
+          <button className={activeSection==="settings"?"active":""} onClick={()=>goTo("settings")}><Settings size={16}/>Settings</button>
         </nav>
 
         <div className="top-live">
@@ -656,14 +675,23 @@ function App() {
       </header>
 
       <aside className="side-nav">
-        {[["Home",Home],["Index Scan",Crosshair],["Stock Scan",ScanLine],["Signals",BellRing],["Positions",BriefcaseBusiness],["Settings",Settings]].map(([label,Icon],i)=>(
-          <button className={i===0?"active":""} key={label}><Icon size={23}/><span>{label}</span></button>
+        {[
+          ["Home",Home,"dashboard"],
+          ["Index Scan",Crosshair,"index"],
+          ["Stock Scan",ScanLine,"stocks"],
+          ["Signals",BellRing,"signals"],
+          ["Positions",BriefcaseBusiness,"positions"],
+          ["Settings",Settings,"settings"]
+        ].map(([label,Icon,key])=>(
+          <button className={activeSection===key?"active":""} key={label} onClick={()=>goTo(key)}>
+            <Icon size={23}/><span>{label}</span>
+          </button>
         ))}
         <div className="side-status"><Radio size={15}/><span>{status.feed_connected?"Connected":"Disconnected"}</span></div>
       </aside>
 
       <main className="main-stage">
-        <section className="top-grid">
+        <section className="top-grid scroll-target" ref={sectionRefs.dashboard}>
           <div className="market-overview glass-card">
             <div className="box-title">MARKET OVERVIEW</div>
             <div className="market-pair">
@@ -672,7 +700,7 @@ function App() {
             </div>
           </div>
 
-          <ScannerControl scanners={scanners} busy={scannerBusy} action={scannerAction}/>
+          <div ref={sectionRefs.index} className="scroll-target"><ScannerControl scanners={scanners} busy={scannerBusy} action={scannerAction}/></div>
 
           <SentimentGauge signals={signals}/>
 
@@ -691,7 +719,7 @@ function App() {
           </div>
         </section>
 
-        <section className="middle-grid">
+        <section className="middle-grid scroll-target" ref={sectionRefs.signals}>
           <div className="chart-card glass-card">
             <div className="chart-head">
               <div><h2>NIFTY 50 · 1m</h2><div className="chart-tabs"><b>1m</b><span>5m</span><span>15m</span><span>1H</span><span>D</span></div></div>
@@ -706,12 +734,19 @@ function App() {
 
         <IndicatorStrip snapshot={niftySnapshot}/>
 
-        <section className="bottom-grid">
-          <StockTable items={stockSignals} onOrder={openManualOrder}/>
+        <section className="bottom-grid scroll-target">
+          <div ref={sectionRefs.stocks} className="scroll-target"><StockTable items={stockSignals} onOrder={openManualOrder}/></div>
           <RecentSignals history={history}/>
-          <Positions positions={positions} loading={positionsLoading} refresh={loadPositions}
-            squareOff={squareOff} squareOffAll={squareOffAll}/>
+          <div ref={sectionRefs.positions} className="scroll-target"><Positions positions={positions} loading={positionsLoading} refresh={loadPositions}
+            squareOff={squareOff} squareOffAll={squareOffAll}/></div>
         </section>
+
+        <div ref={sectionRefs.settings} className="settings-strip glass-card scroll-target">
+          <Settings size={15}/>
+          <span>MANUAL ORDER MODE</span>
+          <b>Auto execution OFF</b>
+          <span>Live data + scanners + positions</span>
+        </div>
 
         {message && <div className="status-toast">{message}</div>}
       </main>
