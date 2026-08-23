@@ -179,7 +179,7 @@ function SentimentGauge({ signals }) {
   const avg = scores.length ? Math.round(scores.reduce((a,b)=>a+b,0)/scores.length) : 0;
   const dir = Object.values(signals).find(Boolean)?.direction || "WAIT";
   return (
-    <div className="sentiment glass-card">
+    <div className="sentiment glass-card mobile-compact-card">
       <div className="box-title">MARKET SENTIMENT</div>
       <div className="gauge">
         <div className="gauge-inner">
@@ -216,10 +216,51 @@ function KeyLevels({ snapshot }) {
   );
 }
 
+function signalTimestampMs(signal) {
+  const raw =
+    signal?.generated_at ||
+    signal?.created_at ||
+    signal?.timestamp ||
+    signal?.signal_time ||
+    signal?.updated_at;
+
+  if (!raw) return null;
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function signalAgeState(signal, nowMs) {
+  const ts = signalTimestampMs(signal);
+  if (!ts) return { stale:false, ageText:"LIVE" };
+
+  const ageMs = Math.max(0, nowMs - ts);
+  const mins = Math.floor(ageMs / 60000);
+
+  return {
+    stale: ageMs >= 15 * 60000,
+    ageText: mins < 1 ? "NOW" : `${mins}m`,
+  };
+}
+
+function approxRisk(signal) {
+  const entry = Number(signal?.entry);
+  const sl = Number(signal?.stop_loss);
+  const qty = Number(
+    signal?.quantity ||
+    signal?.qty ||
+    signal?.lot_size ||
+    1
+  );
+
+  if (![entry, sl, qty].every(Number.isFinite)) return null;
+  return Math.abs(entry - sl) * Math.max(1, qty);
+}
+
 function ScalpingSignal({
   indexSignals,
   stockSignals,
-  onOrder
+  onOrder,
+  nowMs
 }) {
   const combined = [];
 
@@ -247,6 +288,8 @@ function ScalpingSignal({
       target_1: signal.target_1,
       target_2: signal.target_2,
       reasons: signal.reasons || [],
+      ...signalAgeState(signal, nowMs),
+      approxRisk: approxRisk(signal),
     });
   }
 
@@ -265,10 +308,14 @@ function ScalpingSignal({
       target_1: signal.target_1,
       target_2: signal.target_2,
       reasons: signal.reasons || [],
+      ...signalAgeState(signal, nowMs),
+      approxRisk: approxRisk(signal),
     });
   }
 
   combined.sort((a, b) =>
+    Number(Boolean(a.stale)) -
+      Number(Boolean(b.stale)) ||
     Number(Boolean(b.actionable)) -
       Number(Boolean(a.actionable)) ||
     Number(b.score || 0) -
@@ -288,7 +335,7 @@ function ScalpingSignal({
 
   return (
     <div
-      className={`scalp-panel glass-card ${
+      className={`scalp-panel glass-card mobile-priority ${
         topPositive
           ? "call"
           : topNegative
@@ -302,8 +349,12 @@ function ScalpingSignal({
           SCALPING SIGNALS
         </span>
 
-        <b>
-          {top?.grade || "SCANNING"}
+        <b className={top?.stale ? "stale-badge" : ""}>
+          {top?.stale
+            ? `STALE • ${top.ageText}`
+            : top
+              ? `${top.grade || "SETUP"} • ${top.ageText}`
+              : "SCANNING"}
         </b>
       </div>
 
@@ -376,6 +427,18 @@ function ScalpingSignal({
             </span>
           </div>
 
+          <div className="risk-preview">
+            <span>APPROX RISK</span>
+            <b>
+              {top.approxRisk == null
+                ? "Qty required"
+                : `₹${n(top.approxRisk)}`}
+            </b>
+            <small>
+              Entry → Stop Loss
+            </small>
+          </div>
+
           <div className="confirm-box">
             <div className="confirm-title">
               CONFIRMATION
@@ -400,7 +463,7 @@ function ScalpingSignal({
 
           <button
             className="strong-action"
-            disabled={!top.actionable}
+            disabled={!top.actionable || top.stale}
             onClick={() =>
               onOrder({
                 kind: top.kind,
@@ -408,9 +471,11 @@ function ScalpingSignal({
               })
             }
           >
-            {top.actionable
-              ? "MANUAL ORDER"
-              : "WAITING"}
+            {top.stale
+              ? "STALE SIGNAL"
+              : top.actionable
+                ? "MANUAL ORDER"
+                : "WAITING"}
             <ChevronRight size={18}/>
           </button>
         </>
@@ -442,7 +507,9 @@ function ScalpingSignal({
               <div className="rank-symbol">
                 <b>{item.symbol}</b>
                 <small>
-                  {item.grade || "—"}
+                  {item.stale
+                  ? `STALE • ${item.ageText}`
+                  : `${item.grade || "—"} • ${item.ageText}`}
                 </small>
               </div>
 
@@ -462,7 +529,7 @@ function ScalpingSignal({
 
               <button
                 type="button"
-                disabled={!item.actionable}
+                disabled={!item.actionable || item.stale}
                 onClick={() =>
                   onOrder({
                     kind: item.kind,
@@ -530,7 +597,7 @@ function IndicatorStrip({ snapshot }) {
 
 function StockTable({ items, onOrder }) {
   return (
-    <div className="bottom-card glass-card">
+    <div className="bottom-card glass-card recent-signals-card">
       <div className="box-title">TOP STOCK SCANS</div>
       <div className="table-head">
         <span>#</span><span>Stock</span><span>Trend</span><span>Score</span><span>Entry</span><span>Signal</span>
@@ -572,7 +639,7 @@ function RecentSignals({ history }) {
 
 function Positions({ positions, loading, refresh, squareOff, squareOffAll }) {
   return (
-    <div className="positions-box glass-card">
+    <div className={`positions-box glass-card ${positions.length ? "has-positions" : "empty-positions"}`}>
       <div className="positions-head">
         <div><div className="box-title">POSITIONS</div><small>Actual broker positions</small></div>
         <div>
@@ -654,6 +721,7 @@ function App() {
   const [orderBusy,setOrderBusy] = React.useState(false);
 
   const [activeSection,setActiveSection] = React.useState("dashboard");
+  const [clockNow,setClockNow] = React.useState(Date.now());
 
   const sectionRefs = {
     dashboard: React.useRef(null),
@@ -663,6 +731,11 @@ function App() {
     positions: React.useRef(null),
     settings: React.useRef(null),
   };
+
+  React.useEffect(() => {
+    const id = window.setInterval(() => setClockNow(Date.now()), 30000);
+    return () => window.clearInterval(id);
+  }, []);
 
   function goTo(section) {
     setActiveSection(section);
@@ -903,7 +976,7 @@ function App() {
 
           <SentimentGauge signals={signals}/>
 
-          <div className="feed-card glass-card">
+          <div className="feed-card glass-card mobile-compact-card">
             <div className="box-title">LIVE FEED</div>
             <div className="feed-value">{status.feed_connected?"CONNECTED":"OFFLINE"}</div>
             <small>{status.last_tick_at ? new Date(status.last_tick_at).toLocaleTimeString("en-IN") : "Waiting for tick"}</small>
@@ -919,7 +992,7 @@ function App() {
         </section>
 
         <section className="middle-grid chart-free scroll-target" ref={sectionRefs.signals}>
-          <div className="signal-workspace glass-card">
+          <div className="signal-workspace glass-card mobile-priority">
             <div className="workspace-head">
               <div>
                 <small>LIVE SIGNAL WORKSPACE</small>
@@ -997,6 +1070,7 @@ function App() {
             indexSignals={signals}
             stockSignals={stockSignals}
             onOrder={openManualOrder}
+            nowMs={clockNow}
           />
         </section>
 
@@ -1030,6 +1104,21 @@ function App() {
 
         {message && <div className="status-toast">{message}</div>}
       </main>
+
+      <nav className="mobile-quickbar">
+        <button type="button" onClick={()=>goTo("signals")}>
+          <Zap size={16}/>
+          <span>Signals</span>
+        </button>
+        <button type="button" onClick={()=>goTo("positions")}>
+          <Briefcase size={16}/>
+          <span>Positions</span>
+        </button>
+        <button type="button" onClick={()=>goTo("dashboard")}>
+          <Play size={16}/>
+          <span>Scan</span>
+        </button>
+      </nav>
 
       <ManualOrderModal draft={orderDraft} busy={orderBusy} close={()=>setOrderDraft(null)} submit={submitManualOrder}/>
     </div>
