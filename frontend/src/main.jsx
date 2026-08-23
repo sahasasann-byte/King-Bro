@@ -216,57 +216,266 @@ function KeyLevels({ snapshot }) {
   );
 }
 
-function ScalpingSignal({ signal, onOrder }) {
-  const call = signal?.direction === "CALL";
-  const put = signal?.direction === "PUT";
-  const colorClass = call ? "call" : put ? "put" : "wait";
+function ScalpingSignal({
+  indexSignals,
+  stockSignals,
+  onOrder
+}) {
+  const combined = [];
+
+  for (const key of ["NIFTY 50", "SENSEX"]) {
+    const signal = indexSignals?.[key];
+    if (!signal) continue;
+
+    combined.push({
+      kind: "INDEX_OPTION",
+      signal,
+      symbol: key,
+      direction: signal.direction,
+      grade: signal.grade,
+      score: signal.score,
+      actionable: Boolean(
+        signal.actionable &&
+        signal.option_contract
+      ),
+      optionName:
+        signal.option_contract?.display_symbol ||
+        signal.option_contract?.trading_symbol ||
+        "",
+      entry: signal.entry,
+      stop_loss: signal.stop_loss,
+      target_1: signal.target_1,
+      target_2: signal.target_2,
+      reasons: signal.reasons || [],
+    });
+  }
+
+  for (const signal of stockSignals || []) {
+    combined.push({
+      kind: "STOCK",
+      signal,
+      symbol: signal.symbol,
+      direction: signal.direction,
+      grade: signal.grade,
+      score: signal.score,
+      actionable: Boolean(signal.actionable),
+      optionName: "",
+      entry: signal.entry,
+      stop_loss: signal.stop_loss,
+      target_1: signal.target_1,
+      target_2: signal.target_2,
+      reasons: signal.reasons || [],
+    });
+  }
+
+  combined.sort((a, b) =>
+    Number(Boolean(b.actionable)) -
+      Number(Boolean(a.actionable)) ||
+    Number(b.score || 0) -
+      Number(a.score || 0)
+  );
+
+  const top = combined[0] || null;
+  const rest = combined.slice(1, 7);
+
+  const topPositive =
+    top?.direction === "CALL" ||
+    top?.direction === "BUY";
+
+  const topNegative =
+    top?.direction === "PUT" ||
+    top?.direction === "SELL";
 
   return (
-    <div className={`scalp-panel glass-card ${colorClass}`}>
+    <div
+      className={`scalp-panel glass-card ${
+        topPositive
+          ? "call"
+          : topNegative
+            ? "put"
+            : "wait"
+      }`}
+    >
       <div className="scalp-top">
-        <span><Zap size={18}/> SCALPING SIGNAL</span>
-        <b>{signal?.grade || "SCANNING"}</b>
+        <span>
+          <Zap size={18}/>
+          SCALPING SIGNALS
+        </span>
+
+        <b>
+          {top?.grade || "SCANNING"}
+        </b>
       </div>
 
-      <div className="scalp-symbol">
-        {signal?.option_contract?.display_symbol ||
-         signal?.option_contract?.trading_symbol ||
-         "WAITING FOR SETUP"}
-      </div>
+      {top ? (
+        <>
+          <div className="scalp-symbol">
+            {top.symbol}
+          </div>
 
-      <div className="scalp-price">
-        <small>Live LTP</small>
-        <strong>{signal?.option_ltp == null ? "—" : `₹${n(signal.option_ltp)}`}</strong>
-      </div>
+          <div className="scalp-direction">
+            <strong
+              className={
+                topPositive
+                  ? "pos"
+                  : topNegative
+                    ? "neg"
+                    : ""
+              }
+            >
+              {top.direction || "WAIT"}
+            </strong>
 
-      <div className="scalp-grid">
-        <span>Entry <b>{signal?.entry == null ? "—" : `₹${n(signal.entry)}`}</b></span>
-        <span>Stop Loss <b className="neg">{signal?.stop_loss == null ? "—" : `₹${n(signal.stop_loss)}`}</b></span>
-        <span>Target 1 <b className="pos">{signal?.target_1 == null ? "—" : `₹${n(signal.target_1)}`}</b></span>
-        <span>Target 2 <b className="pos">{signal?.target_2 == null ? "—" : `₹${n(signal.target_2)}`}</b></span>
-      </div>
+            <span>
+              SCORE{" "}
+              <b>{top.score ?? "—"}</b>
+            </span>
+          </div>
 
-      <div className="score-ring">
-        <small>SCORE</small>
-        <b>{signal?.score ?? "—"}</b>
-        <span>/100</span>
-      </div>
+          {top.optionName && (
+            <div className="top-contract">
+              {top.optionName}
+            </div>
+          )}
 
-      <div className="confirm-box">
-        <div className="confirm-title">CONFIRMATION</div>
-        <div className="confirm-grid">
-          {(signal?.reasons || []).slice(0,8).map((r, i) => <span key={i}>✓ {r}</span>)}
-          {!(signal?.reasons || []).length && <span>Waiting for confirmations…</span>}
+          <div className="scalp-grid">
+            <span>
+              Entry
+              <b>
+                {top.entry == null
+                  ? "—"
+                  : `₹${n(top.entry)}`}
+              </b>
+            </span>
+
+            <span>
+              Stop Loss
+              <b className="neg">
+                {top.stop_loss == null
+                  ? "—"
+                  : `₹${n(top.stop_loss)}`}
+              </b>
+            </span>
+
+            <span>
+              Target 1
+              <b className="pos">
+                {top.target_1 == null
+                  ? "—"
+                  : `₹${n(top.target_1)}`}
+              </b>
+            </span>
+
+            <span>
+              Target 2
+              <b className="pos">
+                {top.target_2 == null
+                  ? "—"
+                  : `₹${n(top.target_2)}`}
+              </b>
+            </span>
+          </div>
+
+          <div className="confirm-box">
+            <div className="confirm-title">
+              CONFIRMATION
+            </div>
+
+            <div className="confirm-grid">
+              {top.reasons
+                .slice(0, 6)
+                .map((r, i) => (
+                  <span key={i}>
+                    ✓ {r}
+                  </span>
+                ))}
+
+              {!top.reasons.length && (
+                <span>
+                  Waiting for confirmations…
+                </span>
+              )}
+            </div>
+          </div>
+
+          <button
+            className="strong-action"
+            disabled={!top.actionable}
+            onClick={() =>
+              onOrder({
+                kind: top.kind,
+                signal: top.signal,
+              })
+            }
+          >
+            {top.actionable
+              ? "MANUAL ORDER"
+              : "WAITING"}
+            <ChevronRight size={18}/>
+          </button>
+        </>
+      ) : (
+        <div className="combined-empty">
+          Waiting for index / stock signals…
         </div>
-      </div>
+      )}
 
-      <button
-        className="strong-action"
-        disabled={!signal?.actionable || !signal?.option_contract}
-        onClick={() => onOrder({ kind:"INDEX_OPTION", signal })}
-      >
-        {call ? "STRONG CALL SETUP" : put ? "STRONG PUT SETUP" : "WAITING"} <ChevronRight size={18}/>
-      </button>
+      <div className="ranked-signals">
+        <div className="ranked-title">
+          NEXT BEST SIGNALS
+        </div>
+
+        {rest.map((item, i) => {
+          const positive =
+            item.direction === "CALL" ||
+            item.direction === "BUY";
+
+          return (
+            <div
+              className="ranked-row"
+              key={`${item.symbol}-${i}`}
+            >
+              <span className="rank-no">
+                {i + 2}
+              </span>
+
+              <div className="rank-symbol">
+                <b>{item.symbol}</b>
+                <small>
+                  {item.grade || "—"}
+                </small>
+              </div>
+
+              <strong
+                className={
+                  positive
+                    ? "pos"
+                    : "neg"
+                }
+              >
+                {item.direction || "WAIT"}
+              </strong>
+
+              <span className="rank-score">
+                {item.score ?? "—"}
+              </span>
+
+              <button
+                type="button"
+                disabled={!item.actionable}
+                onClick={() =>
+                  onOrder({
+                    kind: item.kind,
+                    signal: item.signal,
+                  })
+                }
+              >
+                ORDER
+              </button>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -445,7 +654,6 @@ function App() {
   const [orderBusy,setOrderBusy] = React.useState(false);
 
   const [activeSection,setActiveSection] = React.useState("dashboard");
-  const [stockPanelOpen,setStockPanelOpen] = React.useState(false);
 
   const sectionRefs = {
     dashboard: React.useRef(null),
@@ -459,14 +667,12 @@ function App() {
   function goTo(section) {
     setActiveSection(section);
 
-    if (section === "stocks") {
-      setStockPanelOpen(true);
-      return;
-    }
+    const target =
+      section === "stocks"
+        ? sectionRefs.signals
+        : sectionRefs[section];
 
-    setStockPanelOpen(false);
-
-    sectionRefs[section]?.current?.scrollIntoView({
+    target?.current?.scrollIntoView({
       behavior: "smooth",
       block: "start",
     });
@@ -787,35 +993,29 @@ function App() {
           </div>
 
           <KeyLevels snapshot={niftySignal}/>
-          <ScalpingSignal signal={niftySignal} onOrder={openManualOrder}/>
+          <ScalpingSignal
+            indexSignals={signals}
+            stockSignals={stockSignals}
+            onOrder={openManualOrder}
+          />
         </section>
 
         <IndicatorStrip snapshot={niftySignal}/>
 
         <section className="bottom-grid scroll-target">
-          <div ref={sectionRefs.stocks} className="stock-teaser glass-card scroll-target">
-            <div>
-              <div className="box-title">STOCK SCANNER</div>
-              <b>{scanners?.stocks?.running ? `${scanners?.stocks?.resolved || 0}/40 LIVE` : "SCANNER STOPPED"}</b>
-              <small>
-                {stockSignals.length
-                  ? `${stockSignals.length} ranked setups available`
-                  : "Waiting for ranked setups"}
-              </small>
+          <div ref={sectionRefs.stocks} className="scroll-target"><div className="bottom-card glass-card scanner-summary">
+            <div className="box-title">STOCK SCANNER</div>
+            <div className="scanner-summary-main">
+              <b>
+                {scanners?.stocks?.running
+                  ? `${scanners?.stocks?.resolved || 0}/40 LIVE`
+                  : "STOPPED"}
+              </b>
+              <span>
+                Results are ranked in SCALPING SIGNALS
+              </span>
             </div>
-
-            <button
-              type="button"
-              onClick={() => {
-                setActiveSection("stocks");
-                setStockPanelOpen(true);
-              }}
-            >
-              OPEN STOCK SCAN
-              <ChevronRight size={16}/>
-            </button>
-          </div>
-
+          </div></div>
           <RecentSignals history={history}/>
           <div ref={sectionRefs.positions} className="scroll-target"><Positions positions={positions} loading={positionsLoading} refresh={loadPositions}
             squareOff={squareOff} squareOffAll={squareOffAll}/></div>
@@ -830,118 +1030,6 @@ function App() {
 
         {message && <div className="status-toast">{message}</div>}
       </main>
-
-      {stockPanelOpen && (
-        <div className="stock-drawer-backdrop" onClick={()=>setStockPanelOpen(false)}>
-          <aside className="stock-drawer glass-card" onClick={e=>e.stopPropagation()}>
-            <div className="stock-drawer-head">
-              <div>
-                <small>LIVE STOCK SCANNER</small>
-                <h2>Top Stock Setups</h2>
-                <span>
-                  {scanners?.stocks?.running
-                    ? `${scanners?.stocks?.resolved || 0}/40 stocks connected`
-                    : "Scanner stopped"}
-                </span>
-              </div>
-
-              <button
-                type="button"
-                className="drawer-close"
-                onClick={()=>setStockPanelOpen(false)}
-              >
-                <X size={18}/>
-              </button>
-            </div>
-
-            <div className="drawer-scan-actions">
-              <button
-                type="button"
-                className="scan-start"
-                disabled={scannerBusy==="stock-start"}
-                onClick={()=>scannerAction("/api/scanners/stocks/start","stock-start")}
-              >
-                <Play size={13}/>
-                START
-              </button>
-
-              <button
-                type="button"
-                className="scan-stop"
-                disabled={scannerBusy==="stock-stop"}
-                onClick={()=>scannerAction("/api/scanners/stocks/stop","stock-stop")}
-              >
-                <Square size={12}/>
-                STOP
-              </button>
-
-              <span className={scanners?.stocks?.running ? "drawer-live pos" : "drawer-live neg"}>
-                {scanners?.stocks?.running ? "LIVE" : "OFFLINE"}
-              </span>
-            </div>
-
-            <div className="drawer-list">
-              {(stockSignals || []).slice(0,10).map((s,i)=>(
-                <div className="drawer-row" key={s.symbol}>
-                  <div className="drawer-rank">{i+1}</div>
-
-                  <div className="drawer-symbol">
-                    <b>{s.symbol}</b>
-                    <small>{s.grade || "—"}</small>
-                  </div>
-
-                  <strong className={s.direction==="BUY" ? "pos" : "neg"}>
-                    {s.direction || "WAIT"}
-                  </strong>
-
-                  <div className="drawer-metric">
-                    <small>SCORE</small>
-                    <b>{s.score ?? "—"}</b>
-                  </div>
-
-                  <div className="drawer-metric">
-                    <small>ENTRY</small>
-                    <b>{s.entry == null ? "—" : `₹${n(s.entry)}`}</b>
-                  </div>
-
-                  <div className="drawer-metric">
-                    <small>SL</small>
-                    <b>{s.stop_loss == null ? "—" : `₹${n(s.stop_loss)}`}</b>
-                  </div>
-
-                  <div className="drawer-metric">
-                    <small>T1 / T2</small>
-                    <b>
-                      {s.target_1 == null
-                        ? "—"
-                        : `₹${n(s.target_1)} / ₹${n(s.target_2)}`}
-                    </b>
-                  </div>
-
-                  <button
-                    type="button"
-                    className="drawer-order"
-                    disabled={!s.actionable}
-                    onClick={()=>{
-                      openManualOrder({kind:"STOCK",signal:s});
-                    }}
-                  >
-                    ORDER
-                  </button>
-                </div>
-              ))}
-
-              {!(stockSignals || []).length && (
-                <div className="drawer-empty">
-                  {scanners?.stocks?.running
-                    ? "Scanning live stocks • waiting for completed candles and ranked setups…"
-                    : "Start STOCK SCAN to begin."}
-                </div>
-              )}
-            </div>
-          </aside>
-        </div>
-      )}
 
       <ManualOrderModal draft={orderDraft} busy={orderBusy} close={()=>setOrderDraft(null)} submit={submitManualOrder}/>
     </div>
