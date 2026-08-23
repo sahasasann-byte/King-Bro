@@ -445,6 +445,7 @@ function App() {
   const [orderBusy,setOrderBusy] = React.useState(false);
 
   const [activeSection,setActiveSection] = React.useState("dashboard");
+  const [stockPanelOpen,setStockPanelOpen] = React.useState(false);
 
   const sectionRefs = {
     dashboard: React.useRef(null),
@@ -457,6 +458,14 @@ function App() {
 
   function goTo(section) {
     setActiveSection(section);
+
+    if (section === "stocks") {
+      setStockPanelOpen(true);
+      return;
+    }
+
+    setStockPanelOpen(false);
+
     sectionRefs[section]?.current?.scrollIntoView({
       behavior: "smooth",
       block: "start",
@@ -784,7 +793,29 @@ function App() {
         <IndicatorStrip snapshot={niftySignal}/>
 
         <section className="bottom-grid scroll-target">
-          <div ref={sectionRefs.stocks} className="scroll-target"><StockTable items={stockSignals} onOrder={openManualOrder}/></div>
+          <div ref={sectionRefs.stocks} className="stock-teaser glass-card scroll-target">
+            <div>
+              <div className="box-title">STOCK SCANNER</div>
+              <b>{scanners?.stocks?.running ? `${scanners?.stocks?.resolved || 0}/40 LIVE` : "SCANNER STOPPED"}</b>
+              <small>
+                {stockSignals.length
+                  ? `${stockSignals.length} ranked setups available`
+                  : "Waiting for ranked setups"}
+              </small>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                setActiveSection("stocks");
+                setStockPanelOpen(true);
+              }}
+            >
+              OPEN STOCK SCAN
+              <ChevronRight size={16}/>
+            </button>
+          </div>
+
           <RecentSignals history={history}/>
           <div ref={sectionRefs.positions} className="scroll-target"><Positions positions={positions} loading={positionsLoading} refresh={loadPositions}
             squareOff={squareOff} squareOffAll={squareOffAll}/></div>
@@ -799,6 +830,118 @@ function App() {
 
         {message && <div className="status-toast">{message}</div>}
       </main>
+
+      {stockPanelOpen && (
+        <div className="stock-drawer-backdrop" onClick={()=>setStockPanelOpen(false)}>
+          <aside className="stock-drawer glass-card" onClick={e=>e.stopPropagation()}>
+            <div className="stock-drawer-head">
+              <div>
+                <small>LIVE STOCK SCANNER</small>
+                <h2>Top Stock Setups</h2>
+                <span>
+                  {scanners?.stocks?.running
+                    ? `${scanners?.stocks?.resolved || 0}/40 stocks connected`
+                    : "Scanner stopped"}
+                </span>
+              </div>
+
+              <button
+                type="button"
+                className="drawer-close"
+                onClick={()=>setStockPanelOpen(false)}
+              >
+                <X size={18}/>
+              </button>
+            </div>
+
+            <div className="drawer-scan-actions">
+              <button
+                type="button"
+                className="scan-start"
+                disabled={scannerBusy==="stock-start"}
+                onClick={()=>scannerAction("/api/scanners/stocks/start","stock-start")}
+              >
+                <Play size={13}/>
+                START
+              </button>
+
+              <button
+                type="button"
+                className="scan-stop"
+                disabled={scannerBusy==="stock-stop"}
+                onClick={()=>scannerAction("/api/scanners/stocks/stop","stock-stop")}
+              >
+                <Square size={12}/>
+                STOP
+              </button>
+
+              <span className={scanners?.stocks?.running ? "drawer-live pos" : "drawer-live neg"}>
+                {scanners?.stocks?.running ? "LIVE" : "OFFLINE"}
+              </span>
+            </div>
+
+            <div className="drawer-list">
+              {(stockSignals || []).slice(0,10).map((s,i)=>(
+                <div className="drawer-row" key={s.symbol}>
+                  <div className="drawer-rank">{i+1}</div>
+
+                  <div className="drawer-symbol">
+                    <b>{s.symbol}</b>
+                    <small>{s.grade || "—"}</small>
+                  </div>
+
+                  <strong className={s.direction==="BUY" ? "pos" : "neg"}>
+                    {s.direction || "WAIT"}
+                  </strong>
+
+                  <div className="drawer-metric">
+                    <small>SCORE</small>
+                    <b>{s.score ?? "—"}</b>
+                  </div>
+
+                  <div className="drawer-metric">
+                    <small>ENTRY</small>
+                    <b>{s.entry == null ? "—" : `₹${n(s.entry)}`}</b>
+                  </div>
+
+                  <div className="drawer-metric">
+                    <small>SL</small>
+                    <b>{s.stop_loss == null ? "—" : `₹${n(s.stop_loss)}`}</b>
+                  </div>
+
+                  <div className="drawer-metric">
+                    <small>T1 / T2</small>
+                    <b>
+                      {s.target_1 == null
+                        ? "—"
+                        : `₹${n(s.target_1)} / ₹${n(s.target_2)}`}
+                    </b>
+                  </div>
+
+                  <button
+                    type="button"
+                    className="drawer-order"
+                    disabled={!s.actionable}
+                    onClick={()=>{
+                      openManualOrder({kind:"STOCK",signal:s});
+                    }}
+                  >
+                    ORDER
+                  </button>
+                </div>
+              ))}
+
+              {!(stockSignals || []).length && (
+                <div className="drawer-empty">
+                  {scanners?.stocks?.running
+                    ? "Scanning live stocks • waiting for completed candles and ranked setups…"
+                    : "Start STOCK SCAN to begin."}
+                </div>
+              )}
+            </div>
+          </aside>
+        </div>
+      )}
 
       <ManualOrderModal draft={orderDraft} busy={orderBusy} close={()=>setOrderDraft(null)} submit={submitManualOrder}/>
     </div>
