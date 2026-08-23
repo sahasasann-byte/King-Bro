@@ -421,8 +421,8 @@ function SignalCard({ symbol, signal }) {
         : "#8edfff";
 
   const cardStyle = {
-    padding: "12px",
-    borderRadius: "16px",
+    padding: "18px",
+    borderRadius: "20px",
     border: `1px solid ${accent}33`,
     background: "rgba(4, 22, 29, 0.34)",
     backdropFilter: "blur(16px)",
@@ -516,7 +516,7 @@ function SignalCard({ symbol, signal }) {
               style={{
                 margin: 0,
                 color: accent,
-                fontSize: "19px",
+                fontSize: "24px",
               }}
             >
               {noSignal
@@ -548,7 +548,7 @@ function SignalCard({ symbol, signal }) {
           <div
             style={{
               color: accent,
-              fontSize: "20px",
+              fontSize: "26px",
               fontWeight: 900,
             }}
           >
@@ -756,8 +756,8 @@ function StockSignalsPanel({
     <section
       className="overview glass"
       style={{
-        marginTop: "7px",
-        padding: "9px 11px",
+        marginTop: "10px",
+        padding: "12px 14px",
       }}
     >
       <div className="overview-head">
@@ -1707,195 +1707,6 @@ function App() {
 
     <div className="page">
 
-      <style>{`
-        /* ===== SINGLE-SCREEN COMPACT DESKTOP OVERRIDES ===== */
-        @media (min-width: 1100px) {
-          html, body, #root {
-            height: 100%;
-            overflow: hidden;
-          }
-
-          .page {
-            min-height: 100vh !important;
-            height: 100vh !important;
-            overflow: hidden !important;
-            display: grid !important;
-            grid-template-columns: 155px minmax(0, 1fr) !important;
-          }
-
-          .sidebar {
-            width: 155px !important;
-            min-width: 155px !important;
-            padding: 14px 10px !important;
-            gap: 10px !important;
-          }
-
-          .brand {
-            margin-bottom: 8px !important;
-          }
-
-          .brand-icon {
-            width: 38px !important;
-            height: 38px !important;
-          }
-
-          .brand h2 {
-            font-size: 20px !important;
-            line-height: 0.95 !important;
-          }
-
-          .brand > span {
-            font-size: 8px !important;
-            letter-spacing: .22em !important;
-          }
-
-          .sidebar nav {
-            gap: 5px !important;
-          }
-
-          .nav {
-            min-height: 34px !important;
-            padding: 7px 8px !important;
-            border-radius: 10px !important;
-            font-size: 11px !important;
-            gap: 7px !important;
-          }
-
-          .nav svg {
-            width: 15px !important;
-            height: 15px !important;
-          }
-
-          .connection {
-            padding: 9px !important;
-            border-radius: 12px !important;
-          }
-
-          .connection b {
-            font-size: 10px !important;
-          }
-
-          .connection small {
-            font-size: 8px !important;
-          }
-
-          main {
-            height: 100vh !important;
-            overflow: hidden !important;
-            padding: 12px 16px 10px !important;
-          }
-
-          header {
-            margin-bottom: 7px !important;
-            min-height: 44px !important;
-          }
-
-          header h1 {
-            font-size: 24px !important;
-            line-height: 1 !important;
-          }
-
-          .live-pill {
-            min-height: 28px !important;
-            padding: 5px 10px !important;
-            font-size: 10px !important;
-          }
-
-          .totp-panel {
-            margin: 5px 0 8px !important;
-            padding: 7px 10px !important;
-            min-height: 44px !important;
-            display: flex !important;
-            align-items: center !important;
-            gap: 8px !important;
-          }
-
-          .totp-panel label {
-            margin: 0 !important;
-            flex: 0 0 150px !important;
-          }
-
-          .totp-panel input {
-            height: 34px !important;
-            min-height: 34px !important;
-            padding: 6px 10px !important;
-            font-size: 12px !important;
-          }
-
-          .totp-panel button {
-            height: 34px !important;
-            min-height: 34px !important;
-            padding: 6px 14px !important;
-            font-size: 10px !important;
-            white-space: nowrap !important;
-          }
-
-          .cards {
-            gap: 8px !important;
-            margin: 0 0 8px !important;
-          }
-
-          .market-card {
-            min-height: 118px !important;
-            padding: 11px 12px !important;
-            border-radius: 15px !important;
-          }
-
-          .market-title h3 {
-            font-size: 13px !important;
-          }
-
-          .market-title small,
-          .tick-time,
-          .market-change {
-            font-size: 9px !important;
-          }
-
-          .market-price {
-            font-size: 22px !important;
-            margin-top: 5px !important;
-          }
-
-          .pulse-icon {
-            width: 30px !important;
-            height: 30px !important;
-          }
-
-          .mini-wave {
-            height: 12px !important;
-            margin: 3px 0 !important;
-          }
-
-          .overview {
-            margin-top: 7px !important;
-          }
-
-          .overview-head {
-            margin-bottom: 7px !important;
-          }
-
-          .overview-head h3 {
-            font-size: 13px !important;
-          }
-
-          .overview-head small {
-            font-size: 9px !important;
-          }
-
-          .live-badge {
-            min-height: 24px !important;
-            padding: 4px 8px !important;
-            font-size: 9px !important;
-          }
-
-          .message {
-            margin-top: 5px !important;
-            min-height: 16px !important;
-            font-size: 9px !important;
-          }
-        }
-      `}</style>
-
 
       <div className="ambient-lights">
 
@@ -2030,13 +1841,11 @@ function App() {
 
             <p
               style={{
-                marginTop: "4px",
+                marginTop: "6px",
                 marginBottom: 0,
                 fontSize: "18px",
-                lineHeight: 1,
                 fontWeight: 900,
                 letterSpacing: "0.08em",
-                textTransform: "none",
                 background:
                   "linear-gradient(90deg, #66ffe2 0%, #62d6ff 48%, #b38cff 100%)",
                 WebkitBackgroundClip: "text",
@@ -2259,8 +2068,8 @@ function App() {
         <section
           className="overview glass"
           style={{
-            marginTop: "7px",
-            padding: "9px 11px",
+            marginTop: "10px",
+            padding: "12px 14px",
           }}
         >
 
