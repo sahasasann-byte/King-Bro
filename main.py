@@ -27,7 +27,7 @@ from config import settings
 
 app = FastAPI(
     title="King Bro Terminal API",
-    version="7.1.0",
+    version="7.2.0",
 )
 
 
@@ -64,6 +64,32 @@ class OptionInspectRequest(BaseModel):
 class AttachOptionRequest(BaseModel):
     instrument_token: str
     exchange_segment: str = "nse_fo"
+
+
+class ManualOrderRequest(BaseModel):
+    exchange_segment: str
+    trading_symbol: str
+    transaction_type: str
+    quantity: int = Field(gt=0)
+    product: str = "MIS"
+    order_type: str = "MKT"
+    price: float = 0
+    validity: str = "DAY"
+    confirm: bool = False
+    client_request_id: str = ""
+
+
+class SquareOffRequest(BaseModel):
+    exchange_segment: str
+    trading_symbol: str
+    quantity: int = Field(gt=0)
+    current_net_quantity: int
+    product: str = "MIS"
+    confirm: bool = False
+
+
+class SquareOffAllRequest(BaseModel):
+    confirm_text: str
 
 
 # =========================================================
@@ -195,6 +221,16 @@ stock_active_5m = {s: None for s in STOCK_UNIVERSE}
 stock_active_15m = {s: None for s in STOCK_UNIVERSE}
 
 stock_signals: dict[str, dict[str, Any]] = {}
+
+# Manual execution only. Signals never call place_order().
+execution_state = {
+    "mode": "MANUAL_ONLY",
+    "auto_order_enabled": False,
+    "last_order_at": None,
+    "last_order_error": None,
+}
+
+recent_manual_requests: dict[str, dict[str, Any]] = {}
 
 option_oi_history: dict[str, dict[str, Any]] = {}
 
@@ -2413,6 +2449,7 @@ async def health():
             "stock_universe_count": len(STOCK_UNIVERSE),
             "stock_signal_count": len(stock_signals),
         },
+        "execution": execution_state,
         "persistence": persistence_status,
     }
 
@@ -2977,6 +3014,475 @@ def _best_stock_signals(limit=12):
     )
 
     return rows[:limit]
+
+
+# =========================================================
+# MANUAL ORDER EXECUTION + POSITIONS — V7.2
+# =========================================================
+
+def _require_broker():
+    if neo_client is None or not status.get("broker_connected"):
+        raise HTTPException(
+            status_code=409,
+            detail="Broker session is not connected. Login with TOTP first.",
+        )
+
+
+def _api_rows(response):
+    if response is None:
+        return []
+
+    if isinstance(response, list):
+        return response
+
+    if not isinstance(response, dict):
+        return []
+
+    data = response.get("data")
+
+    # Some SDK responses wrap data twice.
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        return data["data"]
+
+    if isinstance(data, list):
+        return data
+
+    return []
+
+
+def _int_value(value, default=0):
+    try:
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def _float_value(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _position_net_qty(row):
+    # Prefer broker-provided net quantity when present.
+    for key in (
+        "netQty",
+        "net_qty",
+        "netQuantity",
+        "qty",
+    ):
+        if row.get(key) not in (None, ""):
+            return _int_value(row.get(key))
+
+    cf_buy = _int_value(row.get("cfBuyQty"))
+    fl_buy = _int_value(row.get("flBuyQty"))
+    cf_sell = _int_value(row.get("cfSellQty"))
+    fl_sell = _int_value(row.get("flSellQty"))
+
+    return (cf_buy + fl_buy) - (cf_sell + fl_sell)
+
+
+def _normalise_position(row):
+    net_qty = _position_net_qty(row)
+
+    trading_symbol = str(
+        row.get("trdSym")
+        or row.get("tradingSymbol")
+        or row.get("trading_symbol")
+        or row.get("sym")
+        or ""
+    )
+
+    exchange_segment = str(
+        row.get("exSeg")
+        or row.get("exchangeSegment")
+        or row.get("exchange_segment")
+        or ""
+    )
+
+    product = str(
+        row.get("prod")
+        or row.get("product")
+        or "MIS"
+    )
+
+    avg_price = _float_value(
+        row.get("avgPrc")
+        or row.get("averagePrice")
+        or row.get("avg_price")
+    )
+
+    token = str(
+        row.get("tok")
+        or row.get("instrumentToken")
+        or row.get("instrument_token")
+        or ""
+    )
+
+    return {
+        "trading_symbol": trading_symbol,
+        "exchange_segment": exchange_segment,
+        "product": product,
+        "instrument_token": token,
+        "net_quantity": net_qty,
+        "side": (
+            "LONG"
+            if net_qty > 0
+            else "SHORT"
+            if net_qty < 0
+            else "FLAT"
+        ),
+        "average_price": avg_price,
+        "raw": row,
+    }
+
+
+async def _position_ltp(position):
+    token = position.get("instrument_token")
+    exchange_segment = position.get("exchange_segment")
+
+    if not token or not exchange_segment:
+        return None
+
+    try:
+        response = await asyncio.to_thread(
+            neo_client.quotes,
+            instrument_tokens=[{
+                "instrument_token": str(token),
+                "exchange_segment": str(exchange_segment),
+            }],
+            quote_type="all",
+        )
+
+        rows = _normalise_rows(response)
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+
+            value = number(
+                row.get("ltp")
+                or row.get("last_traded_price")
+                or row.get("last_price")
+            )
+
+            if value is not None:
+                return value
+
+    except Exception:
+        return None
+
+    return None
+
+
+async def _positions_payload():
+    _require_broker()
+
+    response = await asyncio.to_thread(
+        neo_client.positions
+    )
+
+    rows = _api_rows(response)
+    items = []
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        item = _normalise_position(row)
+
+        # Keep flat rows out of the live positions screen.
+        if item["net_quantity"] == 0:
+            continue
+
+        ltp = await _position_ltp(item)
+        item["ltp"] = ltp
+
+        avg = item["average_price"]
+        qty = item["net_quantity"]
+
+        # UI convenience P&L. Raw broker row is also returned.
+        item["unrealized_pnl"] = (
+            round((ltp - avg) * qty, 2)
+            if ltp is not None and avg
+            else None
+        )
+
+        items.append(item)
+
+    return {
+        "count": len(items),
+        "items": items,
+        "raw": response,
+    }
+
+
+def _validate_manual_order(req):
+    segment = req.exchange_segment.strip().lower()
+    product = req.product.strip().upper()
+    order_type = req.order_type.strip().upper()
+    side = req.transaction_type.strip().upper()
+    validity = req.validity.strip().upper()
+    trading_symbol = req.trading_symbol.strip().upper()
+
+    if segment not in {
+        "nse_cm", "bse_cm", "nse_fo", "bse_fo", "mcx_fo"
+    }:
+        raise HTTPException(422, "Unsupported exchange segment.")
+
+    if product not in {"CNC", "MIS", "NRML", "MTF"}:
+        raise HTTPException(422, "Invalid product.")
+
+    if order_type not in {"MKT", "L", "SL", "SL-M"}:
+        raise HTTPException(422, "Invalid order type.")
+
+    if side not in {"B", "S"}:
+        raise HTTPException(422, "transaction_type must be B or S.")
+
+    if validity not in {"DAY", "IOC"}:
+        raise HTTPException(422, "Invalid validity.")
+
+    if not trading_symbol:
+        raise HTTPException(422, "trading_symbol is required.")
+
+    if order_type == "L" and req.price <= 0:
+        raise HTTPException(422, "Limit order requires price > 0.")
+
+    return {
+        "exchange_segment": segment,
+        "product": product,
+        "price": (
+            str(req.price)
+            if order_type == "L"
+            else "0"
+        ),
+        "order_type": order_type,
+        "quantity": str(req.quantity),
+        "validity": validity,
+        "trading_symbol": trading_symbol,
+        "transaction_type": side,
+    }
+
+
+@app.get("/api/execution/status")
+async def execution_status():
+    return execution_state
+
+
+@app.post("/api/orders/manual")
+async def place_manual_order(req: ManualOrderRequest):
+    _require_broker()
+
+    if not req.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Manual confirmation is required before placing a live order.",
+        )
+
+    payload = _validate_manual_order(req)
+
+    # Optional client-side idempotency key prevents accidental double-clicks.
+    request_id = req.client_request_id.strip()
+
+    if request_id and request_id in recent_manual_requests:
+        return {
+            "ok": True,
+            "duplicate_prevented": True,
+            "response": recent_manual_requests[request_id],
+        }
+
+    try:
+        response = await asyncio.to_thread(
+            neo_client.place_order,
+            **payload,
+        )
+
+        execution_state["last_order_at"] = (
+            datetime.now(timezone.utc).isoformat()
+        )
+        execution_state["last_order_error"] = None
+
+        if request_id:
+            recent_manual_requests[request_id] = response
+
+            # Keep memory bounded.
+            if len(recent_manual_requests) > 100:
+                oldest = next(iter(recent_manual_requests))
+                recent_manual_requests.pop(oldest, None)
+
+        await broadcast({
+            "type": "manual_order_update",
+            "data": {
+                "request": payload,
+                "response": response,
+            },
+        })
+
+        return {
+            "ok": True,
+            "manual_only": True,
+            "request": payload,
+            "response": response,
+        }
+
+    except Exception as exc:
+        execution_state["last_order_error"] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=execution_state["last_order_error"],
+        )
+
+
+@app.get("/api/orders")
+async def get_orders():
+    _require_broker()
+
+    try:
+        response = await asyncio.to_thread(
+            neo_client.order_report
+        )
+        return {
+            "ok": True,
+            "orders": _api_rows(response),
+            "raw": response,
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+
+
+@app.get("/api/positions")
+async def get_positions():
+    try:
+        return await _positions_payload()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+
+
+@app.post("/api/positions/square-off")
+async def square_off_position(req: SquareOffRequest):
+    _require_broker()
+
+    if not req.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Square-off confirmation is required.",
+        )
+
+    if req.current_net_quantity == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Position is already flat.",
+        )
+
+    max_qty = abs(int(req.current_net_quantity))
+
+    if req.quantity > max_qty:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Square-off quantity cannot exceed open quantity {max_qty}.",
+        )
+
+    side = "S" if req.current_net_quantity > 0 else "B"
+
+    order = ManualOrderRequest(
+        exchange_segment=req.exchange_segment,
+        trading_symbol=req.trading_symbol,
+        transaction_type=side,
+        quantity=req.quantity,
+        product=req.product,
+        order_type="MKT",
+        price=0,
+        validity="DAY",
+        confirm=True,
+        client_request_id=(
+            "SQOFF-"
+            + req.trading_symbol
+            + "-"
+            + str(datetime.now(timezone.utc).timestamp())
+        ),
+    )
+
+    return await place_manual_order(order)
+
+
+@app.post("/api/positions/square-off-all")
+async def square_off_all(req: SquareOffAllRequest):
+    _require_broker()
+
+    if req.confirm_text.strip().upper() != "SQUARE OFF ALL":
+        raise HTTPException(
+            status_code=400,
+            detail='Type "SQUARE OFF ALL" exactly to confirm.',
+        )
+
+    positions = await _positions_payload()
+
+    results = []
+
+    # Intentionally sequential: easier to audit and avoids burst orders.
+    for position in positions["items"]:
+        qty = abs(int(position["net_quantity"]))
+
+        if qty <= 0:
+            continue
+
+        side = (
+            "S"
+            if position["net_quantity"] > 0
+            else "B"
+        )
+
+        payload = {
+            "exchange_segment": position["exchange_segment"],
+            "product": position["product"],
+            "price": "0",
+            "order_type": "MKT",
+            "quantity": str(qty),
+            "validity": "DAY",
+            "trading_symbol": position["trading_symbol"],
+            "transaction_type": side,
+        }
+
+        try:
+            response = await asyncio.to_thread(
+                neo_client.place_order,
+                **payload,
+            )
+            results.append({
+                "ok": True,
+                "position": position["trading_symbol"],
+                "quantity": qty,
+                "response": response,
+            })
+        except Exception as exc:
+            results.append({
+                "ok": False,
+                "position": position["trading_symbol"],
+                "quantity": qty,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+
+    execution_state["last_order_at"] = (
+        datetime.now(timezone.utc).isoformat()
+    )
+
+    return {
+        "ok": all(x["ok"] for x in results) if results else True,
+        "manual_only": True,
+        "count": len(results),
+        "results": results,
+    }
 
 
 # =========================================================
