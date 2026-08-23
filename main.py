@@ -2,6 +2,8 @@ import asyncio
 import re
 import json
 import os
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from datetime import datetime, timezone, date
 from typing import Optional, Any
@@ -233,6 +235,177 @@ execution_state = {
 recent_manual_requests: dict[str, dict[str, Any]] = {}
 
 option_oi_history: dict[str, dict[str, Any]] = {}
+
+
+# =========================================================
+# TELEGRAM SIGNAL ALERTS — V7.3
+# =========================================================
+# Environment variables:
+# TELEGRAM_BOT_TOKEN = token from BotFather
+# TELEGRAM_CHAT_ID   = numeric chat/group/channel id
+#
+# Signal alerts only. This module NEVER places an order.
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+telegram_state = {
+    "configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+    "enabled": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+    "last_sent_at": None,
+    "last_error": None,
+    "sent_count": 0,
+}
+
+# key -> last alert timestamp. Prevents repeated alerts for the same setup.
+telegram_alert_cache: dict[str, float] = {}
+TELEGRAM_ALERT_COOLDOWN_SECONDS = 15 * 60
+
+
+def _telegram_signal_key(signal: dict[str, Any]) -> str:
+    contract = signal.get("option_contract") or {}
+    return "|".join([
+        str(signal.get("symbol") or ""),
+        str(signal.get("direction") or ""),
+        str(signal.get("grade") or ""),
+        str(contract.get("instrument_token") or contract.get("display_symbol") or ""),
+    ])
+
+
+def _telegram_message(signal: dict[str, Any]) -> str:
+    contract = signal.get("option_contract") or {}
+    reasons = signal.get("reasons") or []
+
+    lines = [
+        "👑 THE RAAJA BRO — SIGNAL",
+        "",
+        f"📊 {signal.get('symbol', '-')}",
+        f"🎯 {signal.get('direction', '-')}  |  {signal.get('grade', '-')}",
+        f"⭐ Score: {signal.get('score', '-')}/100",
+    ]
+
+    option_name = contract.get("display_symbol")
+    if option_name:
+        lines.append(f"🧾 Option: {option_name}")
+
+    if signal.get("underlying_ltp") is not None:
+        lines.append(f"Index/Spot: {signal.get('underlying_ltp')}")
+    if signal.get("option_ltp") is not None:
+        lines.append(f"Option LTP: ₹{signal.get('option_ltp')}")
+    if signal.get("entry") is not None:
+        lines.append(f"Entry: ₹{signal.get('entry')}")
+    if signal.get("stop_loss") is not None:
+        lines.append(f"SL: ₹{signal.get('stop_loss')}")
+    if signal.get("target_1") is not None:
+        lines.append(f"T1: ₹{signal.get('target_1')}")
+    if signal.get("target_2") is not None:
+        lines.append(f"T2: ₹{signal.get('target_2')}")
+
+    if reasons:
+        lines.extend(["", "Confirmations:"])
+        lines.extend(f"• {x}" for x in reasons[:8])
+
+    lines.extend([
+        "",
+        "⚠️ MANUAL ORDER ONLY — no automatic execution.",
+        f"Time: {signal.get('generated_at') or datetime.now(timezone.utc).isoformat()}",
+    ])
+    return "\n".join(lines)
+
+
+def _telegram_send_sync(message: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        raise RuntimeError(
+            "Telegram is not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID."
+        )
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = urllib.parse.urlencode({
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "disable_web_page_preview": "true",
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+
+    with urllib.request.urlopen(req, timeout=12) as response:
+        raw = response.read().decode("utf-8")
+        data = json.loads(raw)
+
+    if not data.get("ok"):
+        raise RuntimeError(f"Telegram API error: {data}")
+
+    return data
+
+
+async def _maybe_send_telegram_signal(signal: dict[str, Any]):
+    # Only final actionable A+/STRONG signals, after option confirmation.
+    if not telegram_state["enabled"]:
+        return False
+    if not signal.get("actionable"):
+        return False
+    if signal.get("grade") not in {"A+", "STRONG"}:
+        return False
+
+    key = _telegram_signal_key(signal)
+    now_ts = datetime.now(timezone.utc).timestamp()
+    previous_ts = telegram_alert_cache.get(key)
+
+    if previous_ts and (now_ts - previous_ts) < TELEGRAM_ALERT_COOLDOWN_SECONDS:
+        return False
+
+    try:
+        await asyncio.to_thread(_telegram_send_sync, _telegram_message(signal))
+        telegram_alert_cache[key] = now_ts
+        telegram_state["last_sent_at"] = datetime.now(timezone.utc).isoformat()
+        telegram_state["last_error"] = None
+        telegram_state["sent_count"] += 1
+        return True
+    except Exception as exc:
+        telegram_state["last_error"] = f"{type(exc).__name__}: {exc}"
+        return False
+
+
+@app.get("/api/telegram/status")
+async def telegram_status():
+    return {
+        **telegram_state,
+        "bot_token_configured": bool(TELEGRAM_BOT_TOKEN),
+        "chat_id_configured": bool(TELEGRAM_CHAT_ID),
+        "cooldown_seconds": TELEGRAM_ALERT_COOLDOWN_SECONDS,
+    }
+
+
+@app.post("/api/telegram/test")
+async def telegram_test():
+    if not telegram_state["configured"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID first.",
+        )
+    try:
+        message = (
+            "👑 THE RAAJA BRO — Telegram connected.\n"
+            "Signal alerts are ON.\n"
+            "MANUAL ORDER ONLY — auto execution remains OFF."
+        )
+        result = await asyncio.to_thread(_telegram_send_sync, message)
+        telegram_state["last_sent_at"] = datetime.now(timezone.utc).isoformat()
+        telegram_state["last_error"] = None
+        telegram_state["sent_count"] += 1
+        return {"status": "ok", "telegram": telegram_state, "message_id": (result.get("result") or {}).get("message_id")}
+    except Exception as exc:
+        telegram_state["last_error"] = f"{type(exc).__name__}: {exc}"
+        raise HTTPException(
+            status_code=400,
+            detail={"error_type": type(exc).__name__, "message": str(exc)},
+        )
+
 
 # =========================================================
 # CANDLE PERSISTENCE / RESTORE — V6.1
@@ -1112,6 +1285,10 @@ async def _evaluate_signal(symbol):
     # V6: Technical signal first; real option confirmation only when
     # the technical setup is actionable. This keeps REST load controlled.
     signal = await _attach_auto_option_to_signal(signal)
+
+    # Telegram is alert-only. It runs only after technical + option filters
+    # have produced a final actionable A+/STRONG signal.
+    await _maybe_send_telegram_signal(signal)
 
     previous = signals.get(symbol)
     signals[symbol] = signal
@@ -2817,6 +2994,7 @@ async def _evaluate_stock_signal(symbol):
         "mode": "STOCK_SIGNAL_ONLY",
     }
 
+    await _maybe_send_telegram_signal(signal)
     stock_signals[symbol] = signal
 
     await broadcast({
