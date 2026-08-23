@@ -193,7 +193,7 @@ function SentimentGauge({ signals }) {
 }
 
 function KeyLevels({ snapshot }) {
-  const d = snapshot?.indicators?.daily || {};
+  const d = snapshot?.indicators?.daily_levels || {};
   const f = d?.fib || d?.fibonacci || {};
   return (
     <div className="key-levels glass-card">
@@ -438,7 +438,6 @@ function App() {
   const [scannerBusy,setScannerBusy] = React.useState("");
   const [signals,setSignals] = React.useState({"NIFTY 50":null,"SENSEX":null});
   const [history,setHistory] = React.useState([]);
-  const [niftySnapshot,setNiftySnapshot] = React.useState(null);
   const [stockSignals,setStockSignals] = React.useState([]);
   const [positions,setPositions] = React.useState([]);
   const [positionsLoading,setPositionsLoading] = React.useState(false);
@@ -483,12 +482,6 @@ function App() {
     } catch {}
   },[]);
 
-  const loadNiftySnapshot = React.useCallback(async()=>{
-    try {
-      const r = await fetch(API+"/api/signals/NIFTY");
-      if(r.ok) setNiftySnapshot(await r.json());
-    } catch {}
-  },[]);
 
   const loadStocks = React.useCallback(async()=>{
     try {
@@ -513,10 +506,10 @@ function App() {
   },[status.broker_connected]);
 
   React.useEffect(()=>{
-    loadScanners(); loadSignals(); loadStocks(); loadNiftySnapshot();
-    const t=setInterval(()=>{loadScanners();loadSignals();loadStocks();loadNiftySnapshot();},12000);
+    loadScanners(); loadSignals(); loadStocks();
+    const t=setInterval(()=>{loadScanners();loadSignals();loadStocks();},12000);
     return()=>clearInterval(t);
-  },[loadScanners,loadSignals,loadStocks,loadNiftySnapshot]);
+  },[loadScanners,loadSignals,loadStocks]);
 
   React.useEffect(()=>{
     if(!status.broker_connected) return;
@@ -657,15 +650,6 @@ function App() {
           <div><h1>KING BRO</h1><b>SCALP TERMINAL</b><small>TRADE SMART • TRADE FAST</small></div>
         </div>
 
-        <nav className="top-nav">
-          <button className={activeSection==="dashboard"?"active":""} onClick={()=>goTo("dashboard")}><Home size={16}/>Dashboard</button>
-          <button className={activeSection==="index"?"active":""} onClick={()=>goTo("index")}><Crosshair size={16}/>Index Scan</button>
-          <button className={activeSection==="stocks"?"active":""} onClick={()=>goTo("stocks")}><ScanLine size={16}/>Stock Scan</button>
-          <button className={activeSection==="signals"?"active":""} onClick={()=>goTo("signals")}><Zap size={16}/>Signals</button>
-          <button className={activeSection==="positions"?"active":""} onClick={()=>goTo("positions")}><BriefcaseBusiness size={16}/>Positions</button>
-          <button className={activeSection==="settings"?"active":""} onClick={()=>goTo("settings")}><Settings size={16}/>Settings</button>
-        </nav>
-
         <div className="top-live">
           <span className={status.feed_connected?"live":"offline"}>
             {status.feed_connected?<Wifi size={15}/>:<WifiOff size={15}/>}
@@ -719,20 +703,85 @@ function App() {
           </div>
         </section>
 
-        <section className="middle-grid scroll-target" ref={sectionRefs.signals}>
-          <div className="chart-card glass-card">
-            <div className="chart-head">
-              <div><h2>NIFTY 50 · 1m</h2><div className="chart-tabs"><b>1m</b><span>5m</span><span>15m</span><span>1H</span><span>D</span></div></div>
-              <BarChart3 size={20}/>
+        <section className="middle-grid chart-free scroll-target" ref={sectionRefs.signals}>
+          <div className="signal-workspace glass-card">
+            <div className="workspace-head">
+              <div>
+                <small>LIVE SIGNAL WORKSPACE</small>
+                <h2>NIFTY 50 + SENSEX</h2>
+              </div>
+              <div className="workspace-live">
+                <Radio size={15}/>
+                {status.feed_connected ? "REAL-TIME" : "WAITING"}
+              </div>
             </div>
-            <CandleChart candles={niftySnapshot?.one_minute_candles || []} latestLtp={feed["NIFTY 50"]?.ltp}/>
+
+            <div className="workspace-market">
+              <div>
+                <small>NIFTY 50</small>
+                <strong>{n(feed["NIFTY 50"]?.ltp)}</strong>
+                <span className={Number(feed["NIFTY 50"]?.change || 0) >= 0 ? "pos" : "neg"}>
+                  {feed["NIFTY 50"]?.change == null ? "Waiting for tick" : `${Number(feed["NIFTY 50"]?.change) >= 0 ? "+" : ""}${n(feed["NIFTY 50"]?.change)}`}
+                </span>
+              </div>
+              <div>
+                <small>SENSEX</small>
+                <strong>{n(feed["SENSEX"]?.ltp)}</strong>
+                <span className={Number(feed["SENSEX"]?.change || 0) >= 0 ? "pos" : "neg"}>
+                  {feed["SENSEX"]?.change == null ? "Waiting for tick" : `${Number(feed["SENSEX"]?.change) >= 0 ? "+" : ""}${n(feed["SENSEX"]?.change)}`}
+                </span>
+              </div>
+            </div>
+
+            <div className="workspace-signals">
+              <div className={`workspace-signal ${signals["NIFTY 50"]?.direction === "CALL" ? "call" : signals["NIFTY 50"]?.direction === "PUT" ? "put" : "wait"}`}>
+                <div>
+                  <small>NIFTY SIGNAL</small>
+                  <h3>{signals["NIFTY 50"]?.direction || "SCANNING"}</h3>
+                  <span>{signals["NIFTY 50"]?.grade || "WAIT"}</span>
+                </div>
+                <div className="workspace-score">
+                  <small>SCORE</small>
+                  <b>{signals["NIFTY 50"]?.score ?? "—"}</b>
+                </div>
+              </div>
+
+              <div className={`workspace-signal ${signals["SENSEX"]?.direction === "CALL" ? "call" : signals["SENSEX"]?.direction === "PUT" ? "put" : "wait"}`}>
+                <div>
+                  <small>SENSEX SIGNAL</small>
+                  <h3>{signals["SENSEX"]?.direction || "SCANNING"}</h3>
+                  <span>{signals["SENSEX"]?.grade || "WAIT"}</span>
+                </div>
+                <div className="workspace-score">
+                  <small>SCORE</small>
+                  <b>{signals["SENSEX"]?.score ?? "—"}</b>
+                </div>
+              </div>
+            </div>
+
+            <div className="workspace-confirmations">
+              <div>
+                <small>NIFTY CONFIRMATIONS</small>
+                <div className="chip-list">
+                  {(signals["NIFTY 50"]?.reasons || []).slice(0,6).map((r,i)=><span key={i}>✓ {r}</span>)}
+                  {!(signals["NIFTY 50"]?.reasons || []).length && <span>Waiting for completed candles…</span>}
+                </div>
+              </div>
+              <div>
+                <small>SENSEX CONFIRMATIONS</small>
+                <div className="chip-list">
+                  {(signals["SENSEX"]?.reasons || []).slice(0,6).map((r,i)=><span key={i}>✓ {r}</span>)}
+                  {!(signals["SENSEX"]?.reasons || []).length && <span>Waiting for completed candles…</span>}
+                </div>
+              </div>
+            </div>
           </div>
 
-          <KeyLevels snapshot={niftySnapshot}/>
+          <KeyLevels snapshot={niftySignal}/>
           <ScalpingSignal signal={niftySignal} onOrder={openManualOrder}/>
         </section>
 
-        <IndicatorStrip snapshot={niftySnapshot}/>
+        <IndicatorStrip snapshot={niftySignal}/>
 
         <section className="bottom-grid scroll-target">
           <div ref={sectionRefs.stocks} className="scroll-target"><StockTable items={stockSignals} onOrder={openManualOrder}/></div>
