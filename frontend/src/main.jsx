@@ -2,18 +2,17 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import {
   Crown,
-  LayoutDashboard,
   Activity,
   Wifi,
   WifiOff,
-  LockKeyhole,
-  Zap,
-  Radio,
-  CircleDot,
   Play,
   Square,
+  Zap,
+  BriefcaseBusiness,
   ScanLine,
-  CandlestickChart
+  RefreshCw,
+  X,
+  CircleDot
 } from "lucide-react";
 
 import "./styles.css";
@@ -27,22 +26,10 @@ const WS_URL =
   "/ws/market";
 
 const EMPTY = {
-  "NIFTY 50": {
-    key: "NIFTY 50",
-    ltp: null,
-  },
-
-  "SENSEX": {
-    key: "SENSEX",
-    ltp: null,
-  },
-
-  "BANK NIFTY": {
-    key: "BANK NIFTY",
-    ltp: null,
-  },
+  "NIFTY 50": { key: "NIFTY 50", ltp: null },
+  "SENSEX": { key: "SENSEX", ltp: null },
+  "BANK NIFTY": { key: "BANK NIFTY", ltp: null },
 };
-
 
 function formatNumber(value) {
   if (
@@ -53,873 +40,645 @@ function formatNumber(value) {
     return "—";
   }
 
-  return Number(value).toLocaleString(
-    "en-IN",
-    {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }
-  );
+  return Number(value).toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
-
-function MarketCard({ item }) {
-  const pct = item.percent_change;
-  const change = item.change;
-
-  const isDown =
-    pct !== null &&
-    pct !== undefined &&
-    Number(pct) < 0;
+function MarketTile({ item }) {
+  const change = Number(item?.change || 0);
+  const down = change < 0;
 
   return (
-    <div className="market-card glass">
-
-      <div className="card-shine" />
-
-      <div className="market-title">
-
-        <div>
-          <h3>{item.key}</h3>
-
-          <small>
-            {item.key === "SENSEX"
-              ? "BSE"
-              : "NSE"}
-          </small>
-        </div>
-
-        <div
-          className={
-            `pulse-icon ${
-              isDown
-                ? "down"
-                : "up"
-            }`
-          }
-        >
-          <Activity />
-        </div>
-
+    <div className="market-tile">
+      <div className="market-name">
+        <span>{item.key}</span>
+        <Activity size={16} />
       </div>
 
-
-      <div className="market-price">
+      <div className="market-ltp">
         {formatNumber(item.ltp)}
       </div>
 
-
       <div
         className={
-          isDown
-            ? "market-change down"
-            : "market-change up"
+          down
+            ? "market-delta down"
+            : "market-delta up"
         }
       >
-        {change == null
+        {item.change == null
           ? "Waiting for live tick"
-
-          : `${
-              isDown
-                ? "▼"
-                : "▲"
-            } ${
-              formatNumber(
-                Math.abs(change)
-              )
-            }${
-              pct == null
-                ? ""
-
-                : ` (${
-                    isDown
-                      ? ""
-                      : "+"
-                  }${formatNumber(pct)}%)`
-            }`
-        }
+          : `${down ? "▼" : "▲"} ${formatNumber(
+              Math.abs(item.change)
+            )}`}
       </div>
-
-
-      <div className="mini-wave">
-        <span />
-      </div>
-
-
-      <div className="tick-time">
-
-        {item.received_at
-          ? `LIVE • ${
-              new Date(
-                item.received_at
-              ).toLocaleTimeString(
-                "en-IN"
-              )
-            }`
-
-          : "No live tick received"
-        }
-
-      </div>
-
     </div>
   );
 }
 
-
-function ScannerPanel({
+function ScannerBar({
   scanners,
-  scannerBusy,
+  busy,
   onIndexStart,
   onIndexStop,
   onStockStart,
   onStockStop
 }) {
   const indexOn =
-    Boolean(
-      scanners?.index?.enabled
-    );
+    Boolean(scanners?.index?.enabled);
 
-  const stockEnabled =
-    Boolean(
-      scanners?.stocks?.enabled
-    );
-
-  const stockRunning =
-    Boolean(
-      scanners?.stocks?.running
-    );
-
-  const panelStyle = {
-    marginTop: "10px",
-    padding: "7px 11px",
-  };
-
-  const gridStyle = {
-    display: "grid",
-    gridTemplateColumns:
-      "repeat(2, minmax(220px, 1fr))",
-    gap: "14px",
-  };
-
-  const cardStyle = {
-    padding: "10px 12px",
-    borderRadius: "18px",
-    border:
-      "1px solid rgba(120,255,220,0.12)",
-    background:
-      "rgba(5,25,28,0.28)",
-    backdropFilter: "blur(14px)",
-  };
-
-  const headStyle = {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: "12px",
-    marginBottom: "6px",
-  };
-
-  const statusStyle = (active) => ({
-    fontSize: "11px",
-    fontWeight: 800,
-    letterSpacing: "0.08em",
-    color: active
-      ? "#69ffbf"
-      : "#ff7f92",
-  });
-
-  const btnRow = {
-    display: "flex",
-    gap: "10px",
-    marginTop: "7px",
-    flexWrap: "wrap",
-  };
-
-  const btnBase = {
-    border: "1px solid rgba(115,255,225,0.22)",
-    background:
-      "rgba(0, 255, 190, 0.08)",
-    color: "#dffef7",
-    padding: "10px 14px",
-    borderRadius: "12px",
-    fontWeight: 800,
-    cursor: "pointer",
-    display: "inline-flex",
-    alignItems: "center",
-    gap: "7px",
-  };
+  const stockOn =
+    Boolean(scanners?.stocks?.running);
 
   return (
-    <section
-      className="overview glass"
-      style={panelStyle}
-    >
-
-      <div style={gridStyle}>
-
-        <div style={cardStyle}>
-
-          <div style={headStyle}>
-
-            <div>
-              <b>
-                INDEX SIG
-              </b>
-
-
-            </div>
-
-            <span
-              style={
-                statusStyle(indexOn)
-              }
-            >
-              {indexOn
-                ? "RUNNING"
-                : "STOPPED"}
-            </span>
-
-          </div>
-
-
-
-
-
-          <div style={btnRow}>
-
-            <button
-              type="button"
-              style={btnBase}
-              disabled={
-                scannerBusy ===
-                "index-start"
-              }
-              onClick={onIndexStart}
-            >
-              <Play size={15} />
-              START
-            </button>
-
-            <button
-              type="button"
-              style={{
-                ...btnBase,
-                background:
-                  "rgba(255,80,110,0.08)",
-                border:
-                  "1px solid rgba(255,110,130,0.22)",
-              }}
-              disabled={
-                scannerBusy ===
-                "index-stop"
-              }
-              onClick={onIndexStop}
-            >
-              <Square size={15} />
-              STOP
-            </button>
-
-          </div>
-
-        </div>
-
-
-        <div style={cardStyle}>
-
-          <div style={headStyle}>
-
-            <div>
-              <b>
-                STOCK SIG
-              </b>
-
-
-            </div>
-
-            <span
-              style={
-                statusStyle(
-                  stockRunning
-                )
-              }
-            >
-              {stockRunning
-                ? "RUNNING"
-                : stockEnabled
-                  ? "ARMED"
-                  : "STOPPED"}
-            </span>
-
-          </div>
-
-
-
-
-
-          <div style={btnRow}>
-
-            <button
-              type="button"
-              style={btnBase}
-              disabled={
-                scannerBusy ===
-                "stock-start"
-              }
-              onClick={onStockStart}
-            >
-              <Play size={15} />
-              START
-            </button>
-
-            <button
-              type="button"
-              style={{
-                ...btnBase,
-                background:
-                  "rgba(255,80,110,0.08)",
-                border:
-                  "1px solid rgba(255,110,130,0.22)",
-              }}
-              disabled={
-                scannerBusy ===
-                "stock-stop"
-              }
-              onClick={onStockStop}
-            >
-              <Square size={15} />
-              STOP
-            </button>
-
-          </div>
-
-        </div>
-
+    <section className="scanner-bar">
+      <div className="scanner-title">
+        <ScanLine size={19} />
+        <span>SCAN CONTROL</span>
       </div>
 
+      <div className="scan-unit">
+        <div>
+          <b>INDEX SIG</b>
+          <small>
+            NIFTY 50 + SENSEX
+          </small>
+        </div>
+
+        <span
+          className={
+            indexOn
+              ? "state on"
+              : "state off"
+          }
+        >
+          {indexOn
+            ? "RUNNING"
+            : "STOPPED"}
+        </span>
+
+        <button
+          className="mini-btn start"
+          disabled={busy === "index-start"}
+          onClick={onIndexStart}
+        >
+          <Play size={14} />
+          START
+        </button>
+
+        <button
+          className="mini-btn stop"
+          disabled={busy === "index-stop"}
+          onClick={onIndexStop}
+        >
+          <Square size={13} />
+          STOP
+        </button>
+      </div>
+
+      <div className="scan-divider" />
+
+      <div className="scan-unit">
+        <div>
+          <b>STOCK SIG</b>
+          <small>
+            Fixed 40-stock universe
+          </small>
+        </div>
+
+        <span
+          className={
+            stockOn
+              ? "state on"
+              : "state off"
+          }
+        >
+          {stockOn
+            ? "RUNNING"
+            : "STOPPED"}
+        </span>
+
+        <button
+          className="mini-btn start"
+          disabled={busy === "stock-start"}
+          onClick={onStockStart}
+        >
+          <Play size={14} />
+          START
+        </button>
+
+        <button
+          className="mini-btn stop"
+          disabled={busy === "stock-stop"}
+          onClick={onStockStop}
+        >
+          <Square size={13} />
+          STOP
+        </button>
+      </div>
     </section>
   );
 }
 
+function IndexSignalCard({
+  title,
+  signal,
+  onOrder
+}) {
+  const direction =
+    signal?.direction || "SCANNING";
 
-function SignalCard({ symbol, signal }) {
-  const noSignal = !signal;
+  const call =
+    direction === "CALL";
 
-  const direction = signal?.direction || "WAIT";
-  const grade = signal?.grade || "SCANNING";
-  const score = signal?.score ?? null;
-  const actionable = Boolean(signal?.actionable);
+  const put =
+    direction === "PUT";
 
-  const isCall = direction === "CALL";
-  const isPut = direction === "PUT";
-
-  const accent =
-    isCall
-      ? "#69ffbf"
-      : isPut
-        ? "#ff7f92"
-        : "#8edfff";
-
-  const cardStyle = {
-    padding: "18px",
-    borderRadius: "20px",
-    border: `1px solid ${accent}33`,
-    background: "rgba(4, 22, 29, 0.34)",
-    backdropFilter: "blur(16px)",
-    boxShadow: `0 0 35px ${accent}10`,
-  };
-
-  const pillStyle = {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: "8px",
-    padding: "7px 11px",
-    borderRadius: "999px",
-    border: `1px solid ${accent}44`,
-    color: accent,
-    fontSize: "12px",
-    fontWeight: 900,
-    letterSpacing: "0.08em",
-  };
-
-  const row = {
-    display: "grid",
-    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-    gap: "10px",
-    marginTop: "14px",
-  };
-
-  const stat = {
-    padding: "11px",
-    borderRadius: "14px",
-    background: "rgba(255,255,255,0.035)",
-    border: "1px solid rgba(255,255,255,0.06)",
-  };
-
-  const small = {
-    fontSize: "10px",
-    opacity: 0.62,
-    letterSpacing: "0.08em",
-    marginBottom: "5px",
-  };
-
-  const value = {
-    fontSize: "14px",
-    fontWeight: 800,
-  };
-
-  const optionName =
-    signal?.option_contract?.display_symbol ||
-    "Waiting for option confirmation";
-
-  const reasons =
-    Array.isArray(signal?.reasons)
-      ? signal.reasons.slice(0, 6)
-      : [];
-
-  const blockers =
-    Array.isArray(signal?.blockers)
-      ? signal.blockers.slice(0, 4)
-      : [];
+  const tone =
+    call
+      ? "positive"
+      : put
+        ? "negative"
+        : "neutral";
 
   return (
-    <div style={cardStyle}>
-
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          gap: "14px",
-        }}
-      >
+    <article className={`signal-card ${tone}`}>
+      <div className="signal-head">
         <div>
-          <div
-            style={{
-              fontSize: "12px",
-              opacity: 0.65,
-              marginBottom: "5px",
-            }}
-          >
-            {symbol} SIGNAL
-          </div>
-
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "10px",
-              flexWrap: "wrap",
-            }}
-          >
-            <h3
-              style={{
-                margin: 0,
-                color: accent,
-                fontSize: "24px",
-              }}
-            >
-              {noSignal
-                ? "SCANNING"
-                : direction}
-            </h3>
-
-            <span style={pillStyle}>
-              {grade}
-            </span>
-          </div>
+          <small>{title}</small>
+          <h3>{direction}</h3>
         </div>
 
-        <div
-          style={{
-            textAlign: "right",
-          }}
-        >
-          <div
-            style={{
-              fontSize: "10px",
-              opacity: 0.62,
-              letterSpacing: "0.08em",
-            }}
-          >
-            SCORE
-          </div>
-
-          <div
-            style={{
-              color: accent,
-              fontSize: "26px",
-              fontWeight: 900,
-            }}
-          >
-            {score == null ? "—" : score}
-          </div>
+        <div className="score">
+          <span>SCORE</span>
+          <b>
+            {signal?.score ?? "—"}
+          </b>
         </div>
       </div>
 
-
-      <div
-        style={{
-          marginTop: "12px",
-          fontSize: "13px",
-          opacity: 0.82,
-        }}
-      >
-        {noSignal
-          ? "Waiting for enough completed candles and a valid setup."
-          : actionable
-            ? `Actionable setup • ${optionName}`
-            : `${optionName}`}
+      <div className="signal-meta">
+        <span>
+          {signal?.grade || "SCANNING"}
+        </span>
+        <span>
+          {signal?.option_contract?.display_symbol ||
+            signal?.option_contract?.trading_symbol ||
+            "Waiting for setup"}
+        </span>
       </div>
 
-
-      <div style={row}>
-
-        <div style={stat}>
-          <div style={small}>
-            OPTION LTP
-          </div>
-          <div style={value}>
+      <div className="levels">
+        <div>
+          <small>LTP</small>
+          <b>
             {signal?.option_ltp == null
               ? "—"
               : `₹${formatNumber(signal.option_ltp)}`}
-          </div>
+          </b>
         </div>
 
-        <div style={stat}>
-          <div style={small}>
-            ENTRY
-          </div>
-          <div style={value}>
+        <div>
+          <small>ENTRY</small>
+          <b>
             {signal?.entry == null
               ? "—"
               : `₹${formatNumber(signal.entry)}`}
-          </div>
+          </b>
         </div>
 
-        <div style={stat}>
-          <div style={small}>
-            STOP LOSS
-          </div>
-          <div style={value}>
+        <div>
+          <small>SL</small>
+          <b>
             {signal?.stop_loss == null
               ? "—"
               : `₹${formatNumber(signal.stop_loss)}`}
-          </div>
+          </b>
         </div>
 
-        <div style={stat}>
-          <div style={small}>
-            T1 / T2
-          </div>
-          <div style={value}>
+        <div>
+          <small>T1 / T2</small>
+          <b>
             {signal?.target_1 == null
               ? "—"
               : `₹${formatNumber(signal.target_1)} / ₹${formatNumber(signal.target_2)}`}
-          </div>
+          </b>
         </div>
-
       </div>
 
-
-      <div
-        style={{
-          marginTop: "14px",
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: "12px",
-        }}
-      >
-
-        <div
-          style={{
-            padding: "12px",
-            borderRadius: "14px",
-            background: "rgba(0,255,190,0.035)",
-          }}
-        >
-          <div
-            style={{
-              fontSize: "10px",
-              opacity: 0.62,
-              marginBottom: "7px",
-              letterSpacing: "0.08em",
-            }}
-          >
-            CONFIRMATIONS
-          </div>
-
-          {reasons.length ? (
-            reasons.map((reason, index) => (
-              <div
-                key={index}
-                style={{
-                  fontSize: "12px",
-                  lineHeight: 1.6,
-                  color: "#bfffe8",
-                }}
-              >
+      <div className="signal-footer">
+        <div className="reason-line">
+          {(signal?.reasons || [])
+            .slice(0, 4)
+            .map((reason) => (
+              <span key={reason}>
                 ✓ {reason}
-              </div>
-            ))
-          ) : (
-            <div
-              style={{
-                fontSize: "12px",
-                opacity: 0.65,
-              }}
-            >
-              Waiting for confirmations...
-            </div>
-          )}
+              </span>
+            ))}
         </div>
 
-
-        <div
-          style={{
-            padding: "12px",
-            borderRadius: "14px",
-            background: "rgba(255,90,120,0.035)",
-          }}
+        <button
+          className="primary-order"
+          disabled={
+            !signal?.actionable ||
+            !signal?.option_contract
+          }
+          onClick={() =>
+            onOrder({
+              kind: "INDEX_OPTION",
+              signal,
+            })
+          }
         >
-          <div
-            style={{
-              fontSize: "10px",
-              opacity: 0.62,
-              marginBottom: "7px",
-              letterSpacing: "0.08em",
-            }}
-          >
-            BLOCKERS
-          </div>
-
-          {blockers.length ? (
-            blockers.map((blocker, index) => (
-              <div
-                key={index}
-                style={{
-                  fontSize: "12px",
-                  lineHeight: 1.6,
-                  color: "#ffc2cc",
-                }}
-              >
-                • {blocker}
-              </div>
-            ))
-          ) : (
-            <div
-              style={{
-                fontSize: "12px",
-                color: "#bfffe8",
-              }}
-            >
-              No active blocker
-            </div>
-          )}
-        </div>
-
+          MANUAL ORDER
+        </button>
       </div>
-
-    </div>
+    </article>
   );
 }
 
-
-function StockSignalsPanel({
+function StockSignals({
   items,
   scanners,
-  error
+  onOrder
 }) {
-  const running =
-    Boolean(
-      scanners?.stocks?.running
-    );
-
-  const resolved =
-    scanners?.stocks?.resolved ?? 0;
-
-  const universeCount =
-    scanners?.stocks?.universe_count ?? 40;
-
-  const actionable =
-    items.filter(
-      (item) =>
-        item?.actionable
-    );
-
-  const visible =
-    actionable.length
-      ? actionable
-      : items.slice(0, 6);
+  const shown =
+    (items || []).slice(0, 6);
 
   return (
-    <section
-      className="overview glass"
-      style={{
-        marginTop: "10px",
-        padding: "12px 14px",
-      }}
-    >
-      <div className="overview-head">
-
+    <section className="panel stock-panel">
+      <div className="panel-head">
         <div>
-          <h3>
-            Stock Signals
-          </h3>
-
-          <small
-            className={
-              running
-                ? "green"
-                : "red"
-            }
-          >
-            ●{" "}
-            {running
-              ? `LIVE • ${resolved}/${universeCount} stocks`
-              : "Scanner stopped"}
-          </small>
+          <small>TOP STOCK SETUPS</small>
+          <h2>Stock Signals</h2>
         </div>
 
-        <div className="live-badge">
-          <Zap />
-          TOP SETUPS
-        </div>
-
+        <span
+          className={
+            scanners?.stocks?.running
+              ? "state on"
+              : "state off"
+          }
+        >
+          {scanners?.stocks?.running
+            ? `${scanners?.stocks?.resolved || 0}/40 LIVE`
+            : "STOPPED"}
+        </span>
       </div>
 
-      {error ? (
-        <div
-          style={{
-            padding: "12px",
-            color: "#ff9aaa",
-            fontSize: "12px",
-          }}
-        >
-          {error}
-        </div>
-      ) : visible.length === 0 ? (
-        <div
-          style={{
-            padding: "16px",
-            textAlign: "center",
-            opacity: 0.7,
-            fontSize: "13px",
-          }}
-        >
-          {running
-            ? "Scanning fixed stock universe • waiting for completed candles..."
-            : "Start STOCK SIG to scan the fixed stock universe."}
+      {shown.length === 0 ? (
+        <div className="empty">
+          {scanners?.stocks?.running
+            ? "Scanning stocks • waiting for completed candles..."
+            : "Start STOCK SIG to scan stocks."}
         </div>
       ) : (
-        <div
-          style={{
-            display: "grid",
-            gap: "8px",
-          }}
-        >
-          {visible.map(
-            (item) => {
+        <div className="stock-list">
+          {shown.map((item) => {
+            const buy =
+              item.direction === "BUY";
 
-              const buy =
-                item.direction === "BUY";
-
-              const accent =
-                buy
-                  ? "#69ffbf"
-                  : "#ff7f92";
-
-              return (
-                <div
-                  key={item.symbol}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns:
-                      "1.15fr .75fr .65fr .75fr repeat(4, 1fr)",
-                    gap: "8px",
-                    alignItems: "center",
-                    padding: "9px 11px",
-                    borderRadius: "13px",
-                    background:
-                      "rgba(255,255,255,0.03)",
-                    border:
-                      `1px solid ${accent}22`,
-                    fontSize: "12px",
-                  }}
-                >
-                  <b>
-                    {item.symbol}
-                  </b>
-
-                  <b
-                    style={{
-                      color: accent,
-                    }}
-                  >
-                    {item.direction ||
-                      "WAIT"}
-                  </b>
-
-                  <span>
-                    {item.grade ||
-                      "—"}
-                  </span>
-
-                  <span>
-                    Score{" "}
-                    <b>
-                      {item.score ?? "—"}
-                    </b>
-                  </span>
-
-                  <span>
-                    LTP{" "}
-                    <b>
-                      {item.ltp == null
-                        ? "—"
-                        : `₹${formatNumber(item.ltp)}`}
-                    </b>
-                  </span>
-
-                  <span>
-                    Entry{" "}
-                    <b>
-                      {item.entry == null
-                        ? "—"
-                        : `₹${formatNumber(item.entry)}`}
-                    </b>
-                  </span>
-
-                  <span>
-                    SL{" "}
-                    <b>
-                      {item.stop_loss == null
-                        ? "—"
-                        : `₹${formatNumber(item.stop_loss)}`}
-                    </b>
-                  </span>
-
-                  <span>
-                    T1/T2{" "}
-                    <b>
-                      {item.target_1 == null
-                        ? "—"
-                        : `₹${formatNumber(item.target_1)} / ₹${formatNumber(item.target_2)}`}
-                    </b>
-                  </span>
+            return (
+              <div
+                className="stock-row"
+                key={item.symbol}
+              >
+                <div>
+                  <b>{item.symbol}</b>
+                  <small>
+                    {item.grade || "—"}
+                  </small>
                 </div>
-              );
-            }
-          )}
+
+                <strong
+                  className={
+                    buy
+                      ? "buy"
+                      : "sell"
+                  }
+                >
+                  {item.direction}
+                </strong>
+
+                <span>
+                  Score{" "}
+                  <b>
+                    {item.score ?? "—"}
+                  </b>
+                </span>
+
+                <span>
+                  Entry{" "}
+                  <b>
+                    {item.entry == null
+                      ? "—"
+                      : `₹${formatNumber(item.entry)}`}
+                  </b>
+                </span>
+
+                <span>
+                  SL{" "}
+                  <b>
+                    {item.stop_loss == null
+                      ? "—"
+                      : `₹${formatNumber(item.stop_loss)}`}
+                  </b>
+                </span>
+
+                <button
+                  className="row-order"
+                  disabled={!item.actionable}
+                  onClick={() =>
+                    onOrder({
+                      kind: "STOCK",
+                      signal: item,
+                    })
+                  }
+                >
+                  ORDER
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
     </section>
   );
 }
 
+function PositionsPanel({
+  positions,
+  loading,
+  onRefresh,
+  onSquareOff,
+  onSquareOffAll
+}) {
+  return (
+    <section className="panel positions-panel">
+      <div className="panel-head">
+        <div>
+          <small>ACCOUNT</small>
+          <h2>Positions</h2>
+        </div>
+
+        <div className="panel-actions">
+          <button
+            className="icon-btn"
+            onClick={onRefresh}
+            title="Refresh positions"
+          >
+            <RefreshCw size={16} />
+          </button>
+
+          <button
+            className="danger-link"
+            disabled={!positions.length}
+            onClick={onSquareOffAll}
+          >
+            SQUARE OFF ALL
+          </button>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="empty">
+          Loading positions...
+        </div>
+      ) : positions.length === 0 ? (
+        <div className="empty">
+          No open positions.
+        </div>
+      ) : (
+        <div className="position-list">
+          {positions.map((p) => (
+            <div
+              className="position-row"
+              key={`${p.exchange_segment}-${p.trading_symbol}`}
+            >
+              <div>
+                <b>
+                  {p.trading_symbol}
+                </b>
+                <small>
+                  {p.side} • Qty{" "}
+                  {p.net_quantity}
+                </small>
+              </div>
+
+              <span>
+                Avg{" "}
+                <b>
+                  ₹{formatNumber(
+                    p.average_price
+                  )}
+                </b>
+              </span>
+
+              <span>
+                LTP{" "}
+                <b>
+                  {p.ltp == null
+                    ? "—"
+                    : `₹${formatNumber(p.ltp)}`}
+                </b>
+              </span>
+
+              <strong
+                className={
+                  Number(
+                    p.unrealized_pnl
+                  ) >= 0
+                    ? "buy"
+                    : "sell"
+                }
+              >
+                {p.unrealized_pnl == null
+                  ? "P&L —"
+                  : `P&L ₹${formatNumber(
+                      p.unrealized_pnl
+                    )}`}
+              </strong>
+
+              <button
+                className="square-btn"
+                onClick={() =>
+                  onSquareOff(p)
+                }
+              >
+                SQUARE OFF
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ManualOrderModal({
+  draft,
+  busy,
+  onClose,
+  onSubmit
+}) {
+  const [quantity, setQuantity] =
+    React.useState(
+      String(draft?.quantity || 1)
+    );
+
+  const [orderType, setOrderType] =
+    React.useState("MKT");
+
+  const [price, setPrice] =
+    React.useState("");
+
+  React.useEffect(() => {
+    setQuantity(
+      String(draft?.quantity || 1)
+    );
+    setOrderType("MKT");
+    setPrice("");
+  }, [draft]);
+
+  if (!draft) {
+    return null;
+  }
+
+  const submit = () => {
+    const qty = Number(quantity);
+
+    if (
+      !Number.isInteger(qty) ||
+      qty <= 0
+    ) {
+      window.alert(
+        "Enter a valid quantity."
+      );
+      return;
+    }
+
+    if (
+      orderType === "L" &&
+      Number(price) <= 0
+    ) {
+      window.alert(
+        "Enter a valid limit price."
+      );
+      return;
+    }
+
+    const confirmed =
+      window.confirm(
+        `${draft.side === "B" ? "BUY" : "SELL"} ${qty} ${draft.trading_symbol}?\n\nThis is a REAL manual order.`
+      );
+
+    if (!confirmed) {
+      return;
+    }
+
+    onSubmit({
+      ...draft,
+      quantity: qty,
+      order_type: orderType,
+      price:
+        orderType === "L"
+          ? Number(price)
+          : 0,
+    });
+  };
+
+  return (
+    <div className="modal-backdrop">
+      <div className="order-modal">
+        <button
+          className="close-modal"
+          onClick={onClose}
+        >
+          <X size={18} />
+        </button>
+
+        <small>MANUAL ONLY</small>
+        <h2>Place Order</h2>
+
+        <div className="order-symbol">
+          <b>
+            {draft.side === "B"
+              ? "BUY"
+              : "SELL"}
+          </b>
+          <span>
+            {draft.trading_symbol}
+          </span>
+        </div>
+
+        <div className="order-grid">
+          <label>
+            Quantity
+            <input
+              type="number"
+              min="1"
+              value={quantity}
+              onChange={(e) =>
+                setQuantity(
+                  e.target.value
+                )
+              }
+            />
+          </label>
+
+          <label>
+            Order Type
+            <select
+              value={orderType}
+              onChange={(e) =>
+                setOrderType(
+                  e.target.value
+                )
+              }
+            >
+              <option value="MKT">
+                Market
+              </option>
+              <option value="L">
+                Limit
+              </option>
+            </select>
+          </label>
+        </div>
+
+        {orderType === "L" && (
+          <label>
+            Limit Price
+            <input
+              type="number"
+              step="0.05"
+              value={price}
+              onChange={(e) =>
+                setPrice(
+                  e.target.value
+                )
+              }
+            />
+          </label>
+        )}
+
+        <button
+          className="confirm-order"
+          disabled={busy}
+          onClick={submit}
+        >
+          {busy
+            ? "PLACING..."
+            : "CONFIRM REAL ORDER"}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function App() {
-
   const [feed, setFeed] =
     React.useState(EMPTY);
 
@@ -952,18 +711,14 @@ function App() {
           "SENSEX",
         ],
       },
-
       stocks: {
         enabled: false,
         running: false,
       },
     });
 
-  const [
-    scannerBusy,
-    setScannerBusy
-  ] = React.useState("");
-
+  const [scannerBusy, setScannerBusy] =
+    React.useState("");
 
   const [signals, setSignals] =
     React.useState({
@@ -971,362 +726,308 @@ function App() {
       "SENSEX": null,
     });
 
-
   const [stockSignals, setStockSignals] =
     React.useState([]);
 
-  const [stockSignalError, setStockSignalError] =
-    React.useState("");
+  const [positions, setPositions] =
+    React.useState([]);
 
+  const [positionsLoading, setPositionsLoading] =
+    React.useState(false);
+
+  const [orderDraft, setOrderDraft] =
+    React.useState(null);
+
+  const [orderBusy, setOrderBusy] =
+    React.useState(false);
 
   const loadScanners =
-    React.useCallback(
-      async () => {
+    React.useCallback(async () => {
+      try {
+        let response =
+          await fetch(
+            API +
+              "/api/scanners/status"
+          );
 
-        try {
-
-          const response =
+        if (!response.ok) {
+          response =
             await fetch(
               API +
-                "/api/scanners/status"
+                "/api/scanners"
             );
-
-          if (!response.ok) {
-            return;
-          }
-
-          const data =
-            await response.json();
-
-          setScanners(data);
-
-        } catch (_) {
-          // Keep UI alive if backend is sleeping.
         }
 
-      },
-      []
-    );
+        if (!response.ok) {
+          return;
+        }
 
-
+        setScanners(
+          await response.json()
+        );
+      } catch (_) {}
+    }, []);
 
   const loadSignals =
-    React.useCallback(
-      async () => {
+    React.useCallback(async () => {
+      try {
+        const response =
+          await fetch(
+            API +
+              "/api/signals"
+          );
 
-        try {
-
-          const response =
-            await fetch(
-              API +
-                "/api/signals"
-            );
-
-          if (!response.ok) {
-            return;
-          }
-
-          const data =
-            await response.json();
-
-          const backendSignals =
-            data?.signals || {};
-
-          setSignals({
-            "NIFTY 50":
-              backendSignals["NIFTY 50"] || null,
-
-            "SENSEX":
-              backendSignals["SENSEX"] || null,
-          });
-
-        } catch (_) {
-          // Signal cards continue showing last known data.
+        if (!response.ok) {
+          return;
         }
 
-      },
-      []
-    );
+        const data =
+          await response.json();
 
+        const src =
+          data?.signals || {};
 
+        setSignals({
+          "NIFTY 50":
+            src["NIFTY 50"] || null,
+          "SENSEX":
+            src["SENSEX"] || null,
+        });
+      } catch (_) {}
+    }, []);
 
   const loadStockSignals =
-    React.useCallback(
-      async () => {
-
-        try {
-
-          const response =
-            await fetch(
-              API +
-                "/api/stocks/signals/best?limit=8"
-            );
-
-          if (!response.ok) {
-            throw new Error(
-              `HTTP ${response.status}`
-            );
-          }
-
-          const data =
-            await response.json();
-
-          setStockSignals(
-            Array.isArray(data?.items)
-              ? data.items
-              : []
+    React.useCallback(async () => {
+      try {
+        const response =
+          await fetch(
+            API +
+              "/api/stocks/signals/best?limit=8"
           );
 
-          setStockSignalError("");
-
-        } catch (error) {
-
-          setStockSignalError(
-            error?.message ||
-            "Stock signal fetch failed."
-          );
-
+        if (!response.ok) {
+          return;
         }
 
-      },
-      []
-    );
+        const data =
+          await response.json();
 
+        setStockSignals(
+          Array.isArray(data?.items)
+            ? data.items
+            : []
+        );
+      } catch (_) {}
+    }, []);
+
+  const loadPositions =
+    React.useCallback(async () => {
+      if (!status.broker_connected) {
+        setPositions([]);
+        return;
+      }
+
+      setPositionsLoading(true);
+
+      try {
+        const response =
+          await fetch(
+            API +
+              "/api/positions"
+          );
+
+        const data =
+          await response.json();
+
+        if (!response.ok) {
+          throw new Error(
+            data?.detail ||
+              "Positions fetch failed."
+          );
+        }
+
+        setPositions(
+          Array.isArray(data?.items)
+            ? data.items
+            : []
+        );
+      } catch (error) {
+        setMessage(
+          `Positions: ${
+            error?.message ||
+            String(error)
+          }`
+        );
+      } finally {
+        setPositionsLoading(false);
+      }
+    }, [status.broker_connected]);
 
   React.useEffect(() => {
-
     loadScanners();
     loadSignals();
     loadStockSignals();
 
-    const indexTimer =
-      setInterval(
-        loadSignals,
-        15000
-      );
+    const timer =
+      setInterval(() => {
+        loadScanners();
+        loadSignals();
+        loadStockSignals();
+      }, 12000);
 
-    const stockTimer =
-      setInterval(
-        loadStockSignals,
-        10000
-      );
-
-    const scannerTimer =
-      setInterval(
-        loadScanners,
-        10000
-      );
-
-    return () => {
-      clearInterval(indexTimer);
-      clearInterval(stockTimer);
-      clearInterval(scannerTimer);
-    };
-
+    return () =>
+      clearInterval(timer);
   }, [
     loadScanners,
     loadSignals,
     loadStockSignals
   ]);
 
+  React.useEffect(() => {
+    if (
+      !status.broker_connected
+    ) {
+      return;
+    }
+
+    loadPositions();
+
+    const timer =
+      setInterval(
+        loadPositions,
+        15000
+      );
+
+    return () =>
+      clearInterval(timer);
+  }, [
+    status.broker_connected,
+    loadPositions
+  ]);
 
   React.useEffect(() => {
-
     let ws = null;
     let reconnectTimer = null;
     let pingTimer = null;
     let destroyed = false;
 
-
-    function connectBrowserSocket() {
-
+    function connectSocket() {
       if (destroyed) {
         return;
       }
 
-
       try {
-
-        ws = new WebSocket(
-          WS_URL
-        );
-
+        ws =
+          new WebSocket(
+            WS_URL
+          );
       } catch (_) {
-
         reconnectTimer =
           setTimeout(
-            connectBrowserSocket,
+            connectSocket,
             3000
           );
-
         return;
       }
 
-
       ws.onopen = () => {
-
         try {
           ws.send("hello");
-        } catch (_) {
-          // ignore
-        }
+        } catch (_) {}
 
-
-        clearInterval(
-          pingTimer
-        );
-
+        clearInterval(pingTimer);
 
         pingTimer =
           setInterval(() => {
-
             if (
-              ws &&
-              ws.readyState ===
-                WebSocket.OPEN
+              ws?.readyState ===
+              WebSocket.OPEN
             ) {
-
               try {
                 ws.send("ping");
-              } catch (_) {
-                // ignore
-              }
-
+              } catch (_) {}
             }
-
           }, 20000);
-
       };
 
-
       ws.onmessage = (event) => {
-
         try {
-
           const msg =
             JSON.parse(
               event.data
             );
 
-
           if (
             msg.type ===
             "status"
           ) {
-
             setStatus(
               msg.data || {}
             );
-
-
-            if (
-              msg.data
-                ?.feed_connected
-            ) {
-
-              setLoginError("");
-
-              setMessage(
-                "Live feed connected."
-              );
-
-            }
-
           }
-
 
           if (
             msg.type ===
             "snapshot"
           ) {
-
             const next = {
               ...EMPTY,
             };
 
-
-            const rows =
-              Array.isArray(
-                msg.data
-              )
+            (
+              Array.isArray(msg.data)
                 ? msg.data
-                : [];
-
-
-            rows.forEach(
-              (item) => {
-
-                if (
-                  item?.key &&
-                  next[item.key]
-                ) {
-
-                  next[item.key] =
-                    item;
-
-                }
-
+                : []
+            ).forEach((item) => {
+              if (
+                item?.key &&
+                next[item.key]
+              ) {
+                next[item.key] =
+                  item;
               }
-            );
-
+            });
 
             setFeed(next);
-
           }
 
-
           if (
-            msg.type ===
-            "tick"
+            msg.type === "tick"
           ) {
-
             const item =
               msg.data;
 
-
             if (
               item?.key &&
-              Object
-                .prototype
-                .hasOwnProperty
-                .call(
-                  EMPTY,
-                  item.key
-                )
+              Object.prototype.hasOwnProperty.call(
+                EMPTY,
+                item.key
+              )
             ) {
-
               setFeed(
                 (prev) => ({
                   ...prev,
-                  [item.key]:
-                    item,
+                  [item.key]: item,
                 })
               );
-
             }
-
           }
 
-
           if (
-            msg.type === "signal_update" ||
-            msg.type === "signal_event"
+            msg.type ===
+              "signal_update" ||
+            msg.type ===
+              "signal_event"
           ) {
-
             const signal =
               msg.data;
 
             if (
-              signal?.symbol &&
-              Object.prototype.hasOwnProperty.call(
-                {
-                  "NIFTY 50": true,
-                  "SENSEX": true,
-                },
-                signal.symbol
-              )
+              signal?.symbol ===
+                "NIFTY 50" ||
+              signal?.symbol ===
+                "SENSEX"
             ) {
-
               setSignals(
                 (prev) => ({
                   ...prev,
@@ -1334,188 +1035,116 @@ function App() {
                     signal,
                 })
               );
-
             }
-
           }
-
-
 
           if (
             msg.type ===
             "stock_signal_update"
           ) {
-
             const signal =
               msg.data;
 
             if (signal?.symbol) {
-
               setStockSignals(
                 (prev) => {
-
                   const next = [
                     signal,
                     ...prev.filter(
-                      (item) =>
-                        item.symbol !==
+                      (x) =>
+                        x.symbol !==
                         signal.symbol
                     ),
                   ];
 
                   next.sort(
-                    (a, b) => {
-                      const aa =
-                        a.actionable
-                          ? 1
-                          : 0;
-
-                      const ba =
-                        b.actionable
-                          ? 1
-                          : 0;
-
-                      if (aa !== ba) {
-                        return ba - aa;
-                      }
-
-                      return (
+                    (a, b) =>
+                      Number(
+                        Boolean(
+                          b.actionable
+                        )
+                      ) -
                         Number(
-                          b.score || 0
-                        ) -
+                          Boolean(
+                            a.actionable
+                          )
+                        ) ||
+                      Number(
+                        b.score || 0
+                      ) -
                         Number(
                           a.score || 0
                         )
-                      );
-                    }
                   );
 
-                  return next.slice(0, 8);
-
+                  return next.slice(
+                    0,
+                    8
+                  );
                 }
               );
-
             }
-
           }
-
-        } catch (error) {
-
-          console.error(
-            "WebSocket message error:",
-            error
-          );
-
-        }
-
+        } catch (_) {}
       };
-
-
-      ws.onerror = () => {
-        // onclose handles retry
-      };
-
 
       ws.onclose = () => {
+        clearInterval(pingTimer);
 
-        clearInterval(
-          pingTimer
-        );
-
-
-        if (
-          !destroyed
-        ) {
-
+        if (!destroyed) {
           reconnectTimer =
             setTimeout(
-              connectBrowserSocket,
+              connectSocket,
               3000
             );
-
         }
-
       };
-
     }
 
-
-    connectBrowserSocket();
-
+    connectSocket();
 
     return () => {
-
       destroyed = true;
-
-      clearInterval(
-        pingTimer
-      );
-
+      clearInterval(pingTimer);
       clearTimeout(
         reconnectTimer
       );
 
-
       try {
         ws?.close();
-      } catch (_) {
-        // ignore
-      }
-
+      } catch (_) {}
     };
-
   }, []);
 
-
-  async function connectKotak(
+  async function connectBroker(
     event
   ) {
-
     event.preventDefault();
-
 
     if (
       !/^\d{6}$/.test(totp)
     ) {
-
-      const errorText =
-        "Enter the current 6-digit TOTP.";
-
       setLoginError(
-        errorText
+        "Enter current 6-digit TOTP."
       );
-
-      setMessage(
-        errorText
-      );
-
       return;
     }
 
-
     setBusy(true);
-
     setLoginError("");
-
-    setMessage(
-      "Connecting..."
-    );
-
+    setMessage("Connecting...");
 
     try {
-
       const response =
         await fetch(
           API +
             "/api/kotak/connect",
           {
             method: "POST",
-
             headers: {
               "Content-Type":
                 "application/json",
             },
-
             body:
               JSON.stringify({
                 totp,
@@ -1523,137 +1152,44 @@ function App() {
           }
         );
 
-
-      let data = {};
-
-      try {
-
-        data =
-          await response.json();
-
-      } catch (_) {
-
-        data = {};
-
-      }
-
+      const data =
+        await response.json();
 
       if (!response.ok) {
-
         const detail =
           data?.detail;
 
-        let errorMessage =
-          "Authentication failed.";
-
-
-        if (
-          typeof detail ===
-          "string"
-        ) {
-
-          errorMessage =
-            detail;
-
-        } else if (
-          detail &&
-          typeof detail ===
-            "object"
-        ) {
-
-          errorMessage =
-            detail.message ||
-            detail.error ||
-            detail.error_type ||
-            errorMessage;
-
-        }
-
-
         throw new Error(
-          errorMessage
+          typeof detail ===
+            "string"
+            ? detail
+            : detail?.message ||
+                "Connection failed."
         );
-
       }
 
-
-      setLoginError("");
-
-      setMessage(
-        "Authenticated. Starting live feed..."
-      );
-
-
       setTotp("");
-
-
-      setStatus(
-        (prev) => ({
-          ...prev,
-
-          broker_connected:
-            true,
-
-          last_error:
-            null,
-        })
+      setMessage(
+        "Live feed connected."
       );
-
-
     } catch (error) {
-
-      const errorText =
-        error?.message ||
-        String(error) ||
-        "Connection failed.";
-
-
-      setLoginError(
-        errorText
-      );
-
-
-      setMessage(
-        `Login failed: ${errorText}`
-      );
-
-
       setTotp("");
-
-
-      setStatus(
-        (prev) => ({
-          ...prev,
-
-          broker_connected:
-            false,
-
-          feed_connected:
-            false,
-        })
+      setLoginError(
+        error?.message ||
+          "Connection failed."
       );
-
-
     } finally {
-
       setBusy(false);
-
     }
-
   }
-
 
   async function scannerAction(
     path,
     busyName
   ) {
-
-    setScannerBusy(
-      busyName
-    );
+    setScannerBusy(busyName);
 
     try {
-
       const response =
         await fetch(
           API + path,
@@ -1665,390 +1201,450 @@ function App() {
       const data =
         await response.json();
 
-      if (
-        data?.message
-      ) {
-        setMessage(
-          data.message
-        );
-      } else {
-        setMessage(
-          "Scanner state updated."
-        );
-      }
+      setMessage(
+        data?.message ||
+          "Scanner updated."
+      );
 
       await loadScanners();
       await loadStockSignals();
-
     } catch (error) {
-
       setMessage(
         `Scanner error: ${
           error?.message ||
           String(error)
         }`
       );
-
     } finally {
-
       setScannerBusy("");
-
     }
-
   }
 
+  function openManualOrder({
+    kind,
+    signal
+  }) {
+    if (!signal?.actionable) {
+      setMessage(
+        "Only actionable signals can open the order dialog."
+      );
+      return;
+    }
 
-  const showLoginPanel =
+    if (
+      kind ===
+      "INDEX_OPTION"
+    ) {
+      const contract =
+        signal.option_contract || {};
+
+      const symbol =
+        contract.trading_symbol ||
+        contract.display_symbol;
+
+      if (!symbol) {
+        setMessage(
+          "Option contract is not ready."
+        );
+        return;
+      }
+
+      setOrderDraft({
+        exchange_segment:
+          contract.exchange_segment ||
+          "nse_fo",
+        trading_symbol: symbol,
+        side: "B",
+        product: "MIS",
+        quantity:
+          Number(
+            contract.lot_size || 1
+          ),
+      });
+
+      return;
+    }
+
+    setOrderDraft({
+      exchange_segment:
+        "nse_cm",
+      trading_symbol:
+        `${signal.symbol}-EQ`,
+      side:
+        signal.direction ===
+        "SELL"
+          ? "S"
+          : "B",
+      product: "MIS",
+      quantity: 1,
+    });
+  }
+
+  async function submitManualOrder(
+    draft
+  ) {
+    setOrderBusy(true);
+
+    try {
+      const response =
+        await fetch(
+          API +
+            "/api/orders/manual",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+            body:
+              JSON.stringify({
+                exchange_segment:
+                  draft.exchange_segment,
+                trading_symbol:
+                  draft.trading_symbol,
+                transaction_type:
+                  draft.side,
+                quantity:
+                  draft.quantity,
+                product:
+                  draft.product,
+                order_type:
+                  draft.order_type,
+                price:
+                  draft.price || 0,
+                validity:
+                  "DAY",
+                confirm:
+                  true,
+                client_request_id:
+                  `WEB-${Date.now()}`,
+              }),
+          }
+        );
+
+      const data =
+        await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          typeof data?.detail ===
+            "string"
+            ? data.detail
+            : JSON.stringify(
+                data?.detail ||
+                data
+              )
+        );
+      }
+
+      setOrderDraft(null);
+      setMessage(
+        "Manual order submitted."
+      );
+
+      setTimeout(
+        loadPositions,
+        1200
+      );
+    } catch (error) {
+      setMessage(
+        `Order failed: ${
+          error?.message ||
+          String(error)
+        }`
+      );
+    } finally {
+      setOrderBusy(false);
+    }
+  }
+
+  async function squareOffPosition(
+    position
+  ) {
+    const qty =
+      Math.abs(
+        Number(
+          position.net_quantity
+        )
+      );
+
+    if (
+      !window.confirm(
+        `Square off ${qty} ${position.trading_symbol}?\n\nThis is a REAL market order.`
+      )
+    ) {
+      return;
+    }
+
+    try {
+      const response =
+        await fetch(
+          API +
+            "/api/positions/square-off",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+            body:
+              JSON.stringify({
+                exchange_segment:
+                  position.exchange_segment,
+                trading_symbol:
+                  position.trading_symbol,
+                quantity: qty,
+                current_net_quantity:
+                  Number(
+                    position.net_quantity
+                  ),
+                product:
+                  position.product ||
+                  "MIS",
+                confirm:
+                  true,
+              }),
+          }
+        );
+
+      const data =
+        await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          typeof data?.detail ===
+            "string"
+            ? data.detail
+            : JSON.stringify(
+                data?.detail ||
+                data
+              )
+        );
+      }
+
+      setMessage(
+        `Square-off submitted: ${position.trading_symbol}`
+      );
+
+      setTimeout(
+        loadPositions,
+        1200
+      );
+    } catch (error) {
+      setMessage(
+        `Square-off failed: ${
+          error?.message ||
+          String(error)
+        }`
+      );
+    }
+  }
+
+  async function squareOffAll() {
+    if (!positions.length) {
+      return;
+    }
+
+    if (
+      !window.confirm(
+        `Square off ALL ${positions.length} positions?`
+      )
+    ) {
+      return;
+    }
+
+    const typed =
+      window.prompt(
+        'Type "SQUARE OFF ALL" to confirm.'
+      );
+
+    if (
+      typed !==
+      "SQUARE OFF ALL"
+    ) {
+      return;
+    }
+
+    try {
+      const response =
+        await fetch(
+          API +
+            "/api/positions/square-off-all",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+            body:
+              JSON.stringify({
+                confirm_text:
+                  typed,
+              }),
+          }
+        );
+
+      const data =
+        await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          typeof data?.detail ===
+            "string"
+            ? data.detail
+            : JSON.stringify(
+                data?.detail ||
+                data
+              )
+        );
+      }
+
+      setMessage(
+        `Square Off All submitted for ${data.count || 0} positions.`
+      );
+
+      setTimeout(
+        loadPositions,
+        1500
+      );
+    } catch (error) {
+      setMessage(
+        `Square Off All failed: ${
+          error?.message ||
+          String(error)
+        }`
+      );
+    }
+  }
+
+  const showLogin =
     !status.feed_connected ||
     Boolean(loginError);
 
-
   return (
-
-    <div className="page">
-
-
-      <div className="ambient-lights">
-
-        <span
-          className=
-            "light light1"
-        />
-
-        <span
-          className=
-            "light light2"
-        />
-
-        <span
-          className=
-            "light light3"
-        />
-
-      </div>
-
-
-      <div className="grid-overlay" />
-
-
-      <aside
-        className=
-          "sidebar glass"
-      >
-
-        <div className="brand">
-
-          <div
-            className=
-              "brand-icon"
-          >
-            <Crown />
+    <div className="app-shell">
+      <header className="topbar">
+        <div className="brand-block">
+          <div className="crown">
+            <Crown size={25} />
           </div>
-
-
-          <h2>
-            KING
-          </h2>
-
-
-          <h2 className="bro">
-            BRO
-          </h2>
-
-
-          <span>
-            TERMINAL
-          </span>
-
-        </div>
-
-
-        <nav>
-
-          <div className="nav active">
-            <LayoutDashboard />
-            Dashboard
-          </div>
-
-
-          <div className="nav">
-            <Activity />
-            Live Market
-          </div>
-
-
-          <div className="nav">
-            <CandlestickChart />
-            Strategies
-          </div>
-
-        </nav>
-
-
-        <div
-          className=
-            "connection glass"
-        >
-
-          {status.feed_connected
-            ? <Wifi />
-            : <WifiOff />
-          }
-
 
           <div>
-
-            <b>
-
-              {status.feed_connected
-                ? "CONNECTED"
-                : "DISCONNECTED"
-              }
-
-            </b>
-
-
-            <small>
-              LIVE FEED
-            </small>
-
-
-            <small>
-              REAL DATA
-            </small>
-
-          </div>
-
-        </div>
-
-      </aside>
-
-
-      <main>
-
-
-        <header>
-
-          <div>
-
             <h1>
-              King Bro{" "}
-              <span>
-                Terminal
-              </span>
+              KING BRO
             </h1>
-
-
-            <p
-              style={{
-                marginTop: "6px",
-                marginBottom: 0,
-                fontSize: "18px",
-                fontWeight: 900,
-                letterSpacing: "0.08em",
-                background:
-                  "linear-gradient(90deg, #66ffe2 0%, #62d6ff 48%, #b38cff 100%)",
-                WebkitBackgroundClip: "text",
-                backgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-                filter:
-                  "drop-shadow(0 0 9px rgba(92, 238, 224, 0.22))",
-              }}
-            >
+            <p>
               The RAAJA Bro !!!
             </p>
-
           </div>
+        </div>
 
-
-          <div
+        <div className="top-status">
+          <span
             className={
               status.feed_connected
-                ? "live-pill live"
-                : "live-pill off"
+                ? "live-pill"
+                : "live-pill offline"
             }
           >
-
-            <CircleDot />
-
-
+            <CircleDot size={13} />
             {status.feed_connected
               ? "LIVE"
-              : "OFFLINE"
-            }
+              : "OFFLINE"}
+          </span>
+        </div>
+      </header>
 
-          </div>
-
-        </header>
-
-
-        {showLoginPanel && (
-
-          <form
-            className=
-              "totp-panel glass"
-
-            onSubmit=
-              {connectKotak}
-          >
-
-            <label>
-
-              <input
-                type="text"
-
-                inputMode="numeric"
-
-                autoComplete=
-                  "one-time-code"
-
-                maxLength={6}
-
-                value={totp}
-
-                disabled={busy}
-
-                onChange={
-                  (event) => {
-
-                    const clean =
-                      event
-                        .target
-                        .value
-                        .replace(
-                          /\D/g,
-                          ""
-                        )
-                        .slice(
-                          0,
-                          6
-                        );
-
-
-                    setTotp(
-                      clean
-                    );
-
-
-                    if (
-                      loginError
-                    ) {
-
-                      setLoginError(
-                        ""
-                      );
-
-                    }
-
-                  }
-                }
-
-                placeholder="TOTP"
-
-                autoFocus
-              />
-
-            </label>
-
-
-            <button
-              type="submit"
-
-              disabled={
-                busy ||
-                totp.length !== 6
+      <main className="dashboard">
+        <section className="hero-strip">
+          {showLogin ? (
+            <form
+              className="login-inline"
+              onSubmit={
+                connectBroker
               }
             >
+              <input
+                value={totp}
+                maxLength={6}
+                inputMode="numeric"
+                placeholder="TOTP"
+                onChange={(e) =>
+                  setTotp(
+                    e.target.value
+                      .replace(
+                        /\D/g,
+                        ""
+                      )
+                      .slice(0, 6)
+                  )
+                }
+              />
 
-              {busy
-                ? "CONNECTING..."
-                : "CONNECT"
-              }
-
-            </button>
-
-
-            {loginError && (
-
-              <div
-                style={{
-                  width: "100%",
-                  marginTop: "10px",
-                  color: "#ff6b7a",
-                  fontSize: "12px",
-                  fontWeight: 600,
-                }}
+              <button
+                disabled={
+                  busy ||
+                  totp.length !== 6
+                }
               >
+                {busy
+                  ? "CONNECTING"
+                  : "CONNECT"}
+              </button>
 
-                ⚠ {loginError}
+              {loginError && (
+                <span className="login-error">
+                  {loginError}
+                </span>
+              )}
+            </form>
+          ) : (
+            <div className="connected-note">
+              <Wifi size={17} />
+              Live feed connected
+            </div>
+          )}
 
-              </div>
-
-            )}
-
-          </form>
-
-        )}
-
-
-        <section className="cards">
-
-          <MarketCard
-            item={
-              feed[
-                "NIFTY 50"
-              ]
-            }
-          />
-
-
-          <MarketCard
-            item={
-              feed[
-                "SENSEX"
-              ]
-            }
-          />
-
-
-          <MarketCard
-            item={
-              feed[
-                "BANK NIFTY"
-              ]
-            }
-          />
-
+          <div className="market-strip">
+            <MarketTile
+              item={
+                feed["NIFTY 50"]
+              }
+            />
+            <MarketTile
+              item={
+                feed["SENSEX"]
+              }
+            />
+            <MarketTile
+              item={
+                feed["BANK NIFTY"]
+              }
+            />
+          </div>
         </section>
 
-
-        <ScannerPanel
+        <ScannerBar
           scanners={scanners}
-          scannerBusy={
-            scannerBusy
-          }
-
+          busy={scannerBusy}
           onIndexStart={() =>
             scannerAction(
               "/api/scanners/index/start",
               "index-start"
             )
           }
-
           onIndexStop={() =>
             scannerAction(
               "/api/scanners/index/stop",
               "index-stop"
             )
           }
-
           onStockStart={() =>
             scannerAction(
               "/api/scanners/stocks/start",
               "stock-start"
             )
           }
-
           onStockStop={() =>
             scannerAction(
               "/api/scanners/stocks/stop",
@@ -2057,95 +1653,98 @@ function App() {
           }
         />
 
+        <section className="main-grid">
+          <div className="panel index-panel">
+            <div className="panel-head">
+              <div>
+                <small>
+                  REAL-TIME
+                </small>
+                <h2>
+                  Index Signals
+                </h2>
+              </div>
 
-        <StockSignalsPanel
-          items={stockSignals}
-          scanners={scanners}
-          error={stockSignalError}
-        />
-
-
-        <section
-          className="overview glass"
-          style={{
-            marginTop: "10px",
-            padding: "12px 14px",
-          }}
-        >
-
-          <div className="overview-head">
-
-            <div>
-              <h3>
-                Live Index Signals
-              </h3>
-
-              <small className="green">
-                ● WebSocket live signal updates
-              </small>
+              <Zap size={20} />
             </div>
 
-            <div className="live-badge">
-              <Zap />
-              SIGNALS
-            </div>
+            <div className="index-signal-grid">
+              <IndexSignalCard
+                title="NIFTY 50 SIGNAL"
+                signal={
+                  signals[
+                    "NIFTY 50"
+                  ]
+                }
+                onOrder={
+                  openManualOrder
+                }
+              />
 
+              <IndexSignalCard
+                title="SENSEX SIGNAL"
+                signal={
+                  signals[
+                    "SENSEX"
+                  ]
+                }
+                onOrder={
+                  openManualOrder
+                }
+              />
+            </div>
           </div>
 
-
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns:
-                "repeat(auto-fit, minmax(320px, 1fr))",
-              gap: "14px",
-            }}
-          >
-
-            <SignalCard
-              symbol="NIFTY 50"
-              signal={
-                signals["NIFTY 50"]
+          <div className="right-column">
+            <StockSignals
+              items={stockSignals}
+              scanners={scanners}
+              onOrder={
+                openManualOrder
               }
             />
 
-            <SignalCard
-              symbol="SENSEX"
-              signal={
-                signals["SENSEX"]
+            <PositionsPanel
+              positions={positions}
+              loading={
+                positionsLoading
+              }
+              onRefresh={
+                loadPositions
+              }
+              onSquareOff={
+                squareOffPosition
+              }
+              onSquareOffAll={
+                squareOffAll
               }
             />
-
           </div>
-
         </section>
 
-
-        <div className="message">
-
-          {message}
-
-
-          {status.last_error &&
-           !loginError
-            ? ` • ${status.last_error}`
-            : ""
-          }
-
-        </div>
-
-
+        {message && (
+          <div className="toast-line">
+            {message}
+          </div>
+        )}
       </main>
 
+      <ManualOrderModal
+        draft={orderDraft}
+        busy={orderBusy}
+        onClose={() =>
+          setOrderDraft(null)
+        }
+        onSubmit={
+          submitManualOrder
+        }
+      />
     </div>
   );
 }
-
 
 createRoot(
   document.getElementById(
     "root"
   )
-).render(
-  <App />
-);
+).render(<App />);
