@@ -753,10 +753,17 @@ function App() {
 
   const loadScanners = React.useCallback(async()=>{
     try {
-      let r = await fetch(API+"/api/scanners/status");
-      if(!r.ok) r = await fetch(API+"/api/scanners");
-      if(r.ok) setScanners(await r.json());
-    } catch {}
+      const r = await fetch(API+"/api/scanners", { cache: "no-store" });
+      const d = await r.json();
+      if(!r.ok) throw new Error(
+        typeof d?.detail === "string"
+          ? d.detail
+          : d?.detail?.message || `Scanner status failed (${r.status})`
+      );
+      setScanners(d);
+    } catch(e) {
+      setMessage(`Scanner status: ${e?.message || e}`);
+    }
   },[]);
 
   const loadSignals = React.useCallback(async()=>{
@@ -863,14 +870,39 @@ function App() {
   }
 
   async function scannerAction(path,key){
+    if(scannerBusy) return;
     setScannerBusy(key);
+    setMessage("");
     try{
-      const r=await fetch(API+path,{method:"POST"});
-      const d=await r.json();
-      setMessage(d?.message||"Scanner updated.");
-      await loadScanners(); await loadStocks();
-    }catch(e){setMessage(`Scanner error: ${e?.message||e}`)}
-    finally{setScannerBusy("")}
+      const r = await fetch(API+path,{
+        method:"POST",
+        cache:"no-store"
+      });
+      const d = await r.json();
+
+      if(!r.ok){
+        const detail =
+          typeof d?.detail === "string"
+            ? d.detail
+            : d?.detail?.message ||
+              d?.message ||
+              `Scanner request failed (${r.status})`;
+        throw new Error(detail);
+      }
+
+      setMessage(
+        d?.message ||
+        (key.endsWith("-start") ? "Scanner started." : "Scanner stopped.")
+      );
+
+      await loadScanners();
+      if(key.startsWith("stock-")) await loadStocks();
+    }catch(e){
+      setMessage(`Scanner error: ${e?.message || e}`);
+      await loadScanners();
+    }finally{
+      setScannerBusy("");
+    }
   }
 
   function openManualOrder({kind,signal}){
