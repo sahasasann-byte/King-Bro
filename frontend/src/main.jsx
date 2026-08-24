@@ -1111,7 +1111,7 @@ function App() {
           <span>Signals</span>
         </button>
         <button type="button" onClick={()=>goTo("positions")}>
-          <Briefcase size={16}/>
+          <BriefcaseBusiness size={16}/>
           <span>Positions</span>
         </button>
         <button type="button" onClick={()=>goTo("dashboard")}>
