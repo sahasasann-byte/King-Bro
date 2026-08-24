@@ -141,18 +141,30 @@ function ScannerControl({ scanners, busy, action }) {
   const stockRunning = !!scanners?.stocks?.running;
 
   const Row = ({ label, sub, running, startPath, stopPath, keyName }) => (
-    <div className="scan-row">
-      <div>
+    <div className="scan-row stable-scan-row">
+      <div className="scan-copy">
         <b>{label}</b>
         <small>{sub}</small>
+        <span className={running ? "scan-state-live" : "scan-state-stop"}>
+          {running ? "● RUNNING" : "● STOPPED"}
+        </span>
       </div>
-      <div className={`toggle-visual ${running ? "on" : ""}`}><i /></div>
-      <button className="scan-start" disabled={busy===`${keyName}-start`}
-        onClick={() => action(startPath, `${keyName}-start`)}>
+
+      <button
+        type="button"
+        className="scan-start"
+        disabled={Boolean(busy) || running}
+        onClick={() => action(startPath, `${keyName}-start`)}
+      >
         <Play size={13}/> START
       </button>
-      <button className="scan-stop" disabled={busy===`${keyName}-stop`}
-        onClick={() => action(stopPath, `${keyName}-stop`)}>
+
+      <button
+        type="button"
+        className="scan-stop"
+        disabled={Boolean(busy) || !running}
+        onClick={() => action(stopPath, `${keyName}-stop`)}
+      >
         <Square size={12}/> STOP
       </button>
     </div>
@@ -169,49 +181,141 @@ function ScannerControl({ scanners, busy, action }) {
         <span>Universe <b>40</b></span>
         <span>Resolved <b>{scanners?.stocks?.resolved ?? 0}</b></span>
         <span>Status <b className={stockRunning ? "pos" : "neg"}>{stockRunning ? "LIVE" : "STOP"}</b></span>
+        <span>Index <b className={indexRunning ? "pos" : "neg"}>{indexRunning ? "LIVE" : "STOP"}</b></span>
       </div>
     </div>
   );
 }
 
 function SentimentGauge({ signals }) {
-  const scores = Object.values(signals).filter(Boolean).map(s => Number(s.score || 0));
-  const avg = scores.length ? Math.round(scores.reduce((a,b)=>a+b,0)/scores.length) : 0;
-  const dir = Object.values(signals).find(Boolean)?.direction || "WAIT";
+  const valid = Object.values(signals || {}).filter((s) => {
+    const score = Number(s?.score);
+    return (
+      Number.isFinite(score) &&
+      score > 0 &&
+      (s?.direction === "CALL" || s?.direction === "PUT")
+    );
+  });
+
+  let value = null;
+  let label = "WAIT";
+
+  if (valid.length) {
+    const signedAverage =
+      valid.reduce((sum, s) => {
+        const score = Math.max(0, Math.min(100, Number(s.score || 0)));
+        return sum + (s.direction === "CALL" ? score : -score);
+      }, 0) / valid.length;
+
+    value = Math.max(0, Math.min(100, Math.round(50 + signedAverage / 2)));
+
+    if (value >= 58) label = "BULLISH";
+    else if (value <= 42) label = "BEARISH";
+    else label = "NEUTRAL";
+  }
+
   return (
     <div className="sentiment glass-card mobile-compact-card">
-      <div className="box-title">MARKET SENTIMENT</div>
-      <div className="gauge">
+      <div className="box-title-row">
+        <div className="box-title">MARKET SENTIMENT</div>
+        <small>SIGNAL BIAS</small>
+      </div>
+
+      <div
+        className={`gauge sentiment-${label.toLowerCase()}`}
+        style={{ "--sentiment": `${value ?? 32}%` }}
+      >
         <div className="gauge-inner">
-          <span>{dir === "CALL" ? "BULLISH" : dir === "PUT" ? "BEARISH" : "WAIT"}</span>
-          <b>{avg || "—"}</b>
+          <span>{label}</span>
+          <b>{value ?? "—"}</b>
           <small>/100</small>
         </div>
+      </div>
+
+      <div className="sentiment-source">
+        {valid.length
+          ? `Derived from ${valid.length} live index setup${valid.length > 1 ? "s" : ""}`
+          : "Waiting for scored CALL / PUT setup"}
       </div>
     </div>
   );
 }
 
 function KeyLevels({ snapshot }) {
-  const d = snapshot?.indicators?.daily_levels || {};
-  const f = d?.fib || d?.fibonacci || {};
+  const [mode, setMode] = React.useState("daily");
+
+  const indicators = snapshot?.indicators || {};
+  const daily = indicators?.daily_levels || {};
+  const five = indicators?.five_minute_levels || {};
+  const levels = mode === "daily" ? daily : five;
+
+  const fib = levels?.fib || {};
+  const ready = Boolean(levels?.ready);
+
+  const rows = [
+    ["R2", fib?.r2, "resistance"],
+    ["R1", fib?.r1, "resistance"],
+    ["P", levels?.pivot, "pivot"],
+    ["S1", fib?.s1, "support"],
+    ["S2", fib?.s2, "support"],
+  ];
+
+  const reason =
+    levels?.reason ||
+    (mode === "daily"
+      ? "Waiting for completed previous-session candles."
+      : "Waiting for completed 5-minute candle.");
+
   return (
     <div className="key-levels glass-card">
-      <div className="box-title">KEY LEVELS</div>
-      <div className="tabs-lite"><b>Daily</b><span>5 Min</span></div>
-      <div className="levels-list">
-        <span><em>R2</em><b>{n(d.r2)}</b></span>
-        <span><em>R1</em><b>{n(d.r1)}</b></span>
-        <span><em>P</em><b>{n(d.pivot)}</b></span>
-        <span><em>S1</em><b>{n(d.s1)}</b></span>
-        <span><em>S2</em><b>{n(d.s2)}</b></span>
+      <div className="box-title-row">
+        <div className="box-title">KEY LEVELS</div>
+        <small>{ready ? "REAL LEVELS" : "WARMING UP"}</small>
       </div>
-      <div className="fib-title">FIB LEVELS</div>
-      <div className="fib-list">
-        <span>0.382 <b>{n(f.r1 || f["0.382"])}</b></span>
-        <span>0.618 <b>{n(f.r2 || f["0.618"])}</b></span>
-        <span>1.000 <b>{n(f.r3 || f["1.000"])}</b></span>
+
+      <div className="tabs-lite real-tabs">
+        <button
+          type="button"
+          className={mode === "daily" ? "active" : ""}
+          onClick={() => setMode("daily")}
+        >
+          Daily
+        </button>
+
+        <button
+          type="button"
+          className={mode === "five" ? "active" : ""}
+          onClick={() => setMode("five")}
+        >
+          5 Min
+        </button>
       </div>
+
+      <div className="levels-list compact-levels">
+        {rows.map(([name, value, kind]) => (
+          <span key={name} className={kind}>
+            <em>{name}</em>
+            <b>{ready && value != null ? n(value) : "—"}</b>
+          </span>
+        ))}
+      </div>
+
+      {ready ? (
+        <div className="levels-foot">
+          <span>
+            {mode === "daily"
+              ? `Prev session ${daily?.reference_session || "ready"}`
+              : "Last completed 5M candle"}
+          </span>
+          {levels?.cpr?.bc != null && levels?.cpr?.tc != null && (
+            <span>
+              CPR {n(levels.cpr.bc)} – {n(levels.cpr.tc)}
+            </span>
+          )}
+        </div>
+      ) : (
+        <div className="levels-wait">{reason}</div>
+      )}
     </div>
   );
 }
@@ -268,6 +372,14 @@ function ScalpingSignal({
     const signal = indexSignals?.[key];
     if (!signal) continue;
 
+    const score = Number(signal?.score || 0);
+    const grade = String(signal?.grade || "").toUpperCase();
+    if (
+      grade === "WARMING_UP" ||
+      grade === "NO_TRADE" ||
+      (!signal?.actionable && score < 60)
+    ) continue;
+
     combined.push({
       kind: "INDEX_OPTION",
       signal,
@@ -294,6 +406,19 @@ function ScalpingSignal({
   }
 
   for (const signal of stockSignals || []) {
+    const score = Number(signal?.score || 0);
+    const grade = String(signal?.grade || "").toUpperCase();
+
+    // Do not promote warm-up / zero-score placeholders as BUY/SELL signals.
+    if (
+      grade === "WARMING_UP" ||
+      grade === "NO_TRADE" ||
+      grade === "ATR_NOT_READY" ||
+      (!signal?.actionable && score < 60)
+    ) {
+      continue;
+    }
+
     combined.push({
       kind: "STOCK",
       signal,
@@ -481,7 +606,7 @@ function ScalpingSignal({
         </>
       ) : (
         <div className="combined-empty">
-          Waiting for index / stock signals…
+          No qualified setup yet • scanners are warming up
         </div>
       )}
 
@@ -742,7 +867,7 @@ function App() {
 
     const target =
       section === "stocks"
-        ? sectionRefs.signals
+        ? sectionRefs.index
         : sectionRefs[section];
 
     target?.current?.scrollIntoView({
@@ -802,7 +927,7 @@ function App() {
 
   React.useEffect(()=>{
     loadScanners(); loadSignals(); loadStocks();
-    const t=setInterval(()=>{loadScanners();loadSignals();loadStocks();},12000);
+    const t=setInterval(()=>{loadScanners();loadSignals();loadStocks();},30000);
     return()=>clearInterval(t);
   },[loadScanners,loadSignals,loadStocks]);
 
@@ -1006,6 +1131,7 @@ function App() {
 
           <div ref={sectionRefs.index} className="scroll-target"><ScannerControl scanners={scanners} busy={scannerBusy} action={scannerAction}/></div>
 
+
           <SentimentGauge signals={signals}/>
 
           <div className="feed-card glass-card mobile-compact-card">
@@ -1098,6 +1224,7 @@ function App() {
           </div>
 
           <KeyLevels snapshot={niftySignal}/>
+
           <ScalpingSignal
             indexSignals={signals}
             stockSignals={stockSignals}
@@ -1106,22 +1233,7 @@ function App() {
           />
         </section>
 
-        <IndicatorStrip snapshot={niftySignal}/>
-
         <section className="bottom-grid scroll-target">
-          <div ref={sectionRefs.stocks} className="scroll-target"><div className="bottom-card glass-card scanner-summary">
-            <div className="box-title">STOCK SCANNER</div>
-            <div className="scanner-summary-main">
-              <b>
-                {scanners?.stocks?.running
-                  ? `${scanners?.stocks?.resolved || 0}/40 LIVE`
-                  : "STOPPED"}
-              </b>
-              <span>
-                Results are ranked in SCALPING SIGNALS
-              </span>
-            </div>
-          </div></div>
           <RecentSignals history={history}/>
           <div ref={sectionRefs.positions} className="scroll-target"><Positions positions={positions} loading={positionsLoading} refresh={loadPositions}
             squareOff={squareOff} squareOffAll={squareOffAll}/></div>
