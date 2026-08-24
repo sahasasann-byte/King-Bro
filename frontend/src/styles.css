@@ -1440,388 +1440,74 @@ body{
 }
 
 
-/* ===== V9 STABLE + CLEAN LAYOUT =====
-   Real controls only, reduced polling, fewer panels.
+/* ===== FRONTEND CLEAN RESTORE =====
+   Preserve the approved V8 glass design, remove visual churn.
 */
-.top-grid{
-  grid-template-columns:minmax(0,1.25fr) minmax(0,1.45fr) minmax(230px,.9fr) !important;
-}
-.market-overview{grid-column:auto !important}
-.scan-control{grid-column:auto !important}
-.feed-card{grid-column:auto !important}
-
-.middle-grid.chart-free{
-  grid-template-columns:minmax(0,1.45fr) minmax(360px,.85fr) !important;
-  align-items:stretch;
-}
-.signal-workspace{
-  min-height:430px !important;
-}
-.scalp-panel{
-  min-height:430px !important;
-}
-.bottom-grid{
-  grid-template-columns:minmax(0,1fr) minmax(0,1fr) !important;
-}
-.positions-box{grid-column:auto !important}
-
-.stable-scan-row{
-  grid-template-columns:minmax(150px,1fr) auto auto !important;
-  gap:8px !important;
-  align-items:center;
-}
-.scan-copy{
-  display:grid;
-  gap:2px;
-}
-.scan-state-live,
-.scan-state-stop{
-  margin-top:3px;
-  font-size:7px;
-  font-weight:900;
-  letter-spacing:.05em;
-}
-.scan-state-live{color:#54ffc2}
-.scan-state-stop{color:#ff7188}
-
-.scan-start:disabled,
-.scan-stop:disabled{
-  opacity:.36 !important;
-  cursor:not-allowed !important;
-  filter:saturate(.55);
+.glass-card,
+.signal-workspace,
+.scalp-panel,
+.market-card,
+.key-levels,
+.bottom-card{
+  animation:none !important;
 }
 
-.scan-start:not(:disabled),
-.scan-stop:not(:disabled){
-  cursor:pointer;
-  transform:translateZ(0);
-}
-.scan-start:not(:disabled):active,
-.scan-stop:not(:disabled):active{
-  transform:scale(.97);
+.tick-flash,
+.signal-sweep::after{
+  animation:none !important;
 }
 
-.scan-stats{
-  grid-template-columns:repeat(4,auto) !important;
-  justify-content:space-between;
+.top-live .live,
+.side-status{
+  animation:softPulse 2.8s ease-in-out infinite !important;
 }
 
-.combined-empty{
-  min-height:270px !important;
-  color:#86b7c6 !important;
-}
-
-@media(max-width:1100px){
-  .top-grid{
-    grid-template-columns:1fr 1fr !important;
-  }
-  .market-overview{grid-column:1/-1 !important}
-  .middle-grid.chart-free{
-    grid-template-columns:1fr !important;
-  }
-  .signal-workspace,
-  .scalp-panel{
-    min-height:auto !important;
-  }
-}
-
-@media(max-width:820px){
-  .top-grid{
-    grid-template-columns:1fr 1fr !important;
-  }
-  .market-overview,
-  .scan-control{
-    grid-column:1/-1 !important;
-  }
-  .feed-card{
-    grid-column:1/-1 !important;
-    min-height:86px !important;
-  }
-  .stable-scan-row{
-    grid-template-columns:1fr auto auto !important;
-  }
-  .scan-stats{
-    grid-template-columns:1fr 1fr !important;
-    gap:4px 12px;
-  }
-  .middle-grid.chart-free .scalp-panel{order:1}
-  .middle-grid.chart-free .signal-workspace{order:2}
-  .bottom-grid{grid-template-columns:1fr !important}
-}
-
-
-/* ===== V10 REAL SENTIMENT + REAL KEY LEVELS =====
-   Only restores panels backed by existing signal/candle data.
-*/
-
-.top-grid{
-  grid-template-columns:
-    minmax(300px,1.2fr)
-    minmax(360px,1.35fr)
-    minmax(210px,.72fr)
-    minmax(230px,.82fr) !important;
-}
-
-.middle-grid.chart-free{
-  grid-template-columns:
-    minmax(0,1.5fr)
-    minmax(185px,.34fr)
-    minmax(360px,.82fr) !important;
-}
-
-.box-title-row{
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:8px;
-}
-
-.box-title-row>small{
-  color:#6fdde9;
-  font-size:6.5px;
-  font-weight:900;
-  letter-spacing:.08em;
-}
-
-.sentiment{
-  min-height:150px;
-  padding:11px;
-}
-
-.sentiment .gauge{
-  width:92px;
-  height:92px;
-  margin:8px auto 4px;
-  border-radius:50%;
-  position:relative;
-  display:grid;
-  place-items:center;
-  background:
-    conic-gradient(
-      #21f49a 0 var(--sentiment),
-      rgba(35,167,207,.18) var(--sentiment) 100%
-    );
-  box-shadow:
-    0 0 22px rgba(29,239,172,.10),
-    inset 0 0 16px rgba(62,220,255,.06);
-}
-
-.sentiment .gauge::after{
-  content:"";
-  position:absolute;
-  width:66px;
-  height:66px;
-  border-radius:50%;
-  background:rgba(4,52,88,.94);
-  border:1px solid rgba(93,216,245,.12);
-}
-
-.sentiment .gauge-inner{
-  position:relative;
-  z-index:2;
-  display:grid;
-  place-items:center;
-  line-height:1.05;
-}
-
-.sentiment .gauge-inner span{
-  font-size:8px;
-  font-weight:900;
-  color:#62ffd0;
-}
-
-.sentiment .gauge-inner b{
-  margin-top:4px;
-  font-size:17px;
-}
-
-.sentiment .gauge-inner small{
-  font-size:7px;
-  color:#9bc4d2;
-}
-
-.sentiment-bearish{
-  background:
-    conic-gradient(
-      #ff657c 0 var(--sentiment),
-      rgba(35,167,207,.18) var(--sentiment) 100%
-    ) !important;
-}
-
-.sentiment-bearish .gauge-inner span{
-  color:#ff8293;
-}
-
-.sentiment-neutral{
-  background:
-    conic-gradient(
-      #ffd35d 0 var(--sentiment),
-      rgba(35,167,207,.18) var(--sentiment) 100%
-    ) !important;
-}
-
-.sentiment-neutral .gauge-inner span{
-  color:#ffe184;
-}
-
-.sentiment-source{
-  min-height:16px;
-  text-align:center;
-  color:#7fa8b8;
-  font-size:6.7px;
-}
-
-.key-levels{
-  min-height:430px !important;
-  padding:11px !important;
-}
-
-.real-tabs{
+.tabs-lite{
   display:grid !important;
   grid-template-columns:1fr 1fr;
   gap:4px;
-  margin:9px 0 11px;
   padding:3px;
   border-radius:9px;
-  background:rgba(3,47,83,.46);
+  background:rgba(4,43,76,.48);
 }
 
-.real-tabs button{
-  min-height:27px;
+.tabs-lite button{
   border:0;
   border-radius:7px;
+  min-height:27px;
   background:transparent;
-  color:#b7d4df;
+  color:#b9d7e1;
   font-size:8px;
   font-weight:900;
   cursor:pointer;
 }
 
-.real-tabs button.active{
+.tabs-lite button.active{
   color:#fff;
-  background:linear-gradient(180deg,#14c68c,#0f9f8c);
-  box-shadow:0 0 15px rgba(32,244,166,.10);
-}
-
-.compact-levels{
-  display:grid !important;
-  grid-template-columns:1fr !important;
-  gap:2px !important;
-}
-
-.compact-levels>span{
-  min-height:42px;
-  display:flex !important;
-  align-items:center;
-  justify-content:space-between;
-  padding:0 7px;
-  border-bottom:1px solid rgba(76,184,223,.08);
-}
-
-.compact-levels em{
-  font-style:normal;
-  font-size:9px;
-  font-weight:900;
-}
-
-.compact-levels b{
-  font-size:10px;
-  color:#eafaff;
-}
-
-.compact-levels .resistance em{color:#54ffc1}
-.compact-levels .pivot em{color:#7fe9ff}
-.compact-levels .support em{color:#ffd35c}
-
-.levels-foot{
-  margin-top:11px;
-  display:grid;
-  gap:5px;
-  padding:8px;
-  border-radius:8px;
-  background:rgba(3,44,76,.30);
-  color:#8db6c5;
-  font-size:6.7px;
+  background:linear-gradient(180deg,rgba(25,213,160,.95),rgba(8,158,145,.95));
+  box-shadow:0 0 14px rgba(25,239,179,.12);
 }
 
 .levels-wait{
-  margin-top:12px;
-  padding:9px;
+  margin-top:10px;
+  padding:8px;
   border-radius:8px;
-  background:rgba(3,44,76,.26);
-  color:#7fa8b8;
+  color:#82afbd;
+  background:rgba(5,48,82,.28);
   font-size:7px;
-  line-height:1.4;
+  line-height:1.35;
 }
 
-@media(max-width:1280px){
-  .top-grid{
-    grid-template-columns:1fr 1fr !important;
-  }
-
-  .middle-grid.chart-free{
-    grid-template-columns:minmax(0,1.35fr) minmax(180px,.42fr) !important;
-  }
-
-  .middle-grid.chart-free .scalp-panel{
-    grid-column:1/-1;
-  }
-
-  .key-levels{
-    min-height:auto !important;
-  }
+/* Do not let recurring data refresh visibly move panels. */
+.market-card,
+.signal-card,
+.stock-rank-row,
+.position-row{
+  transition:none !important;
 }
 
-@media(max-width:820px){
-  .top-grid{
-    grid-template-columns:1fr 1fr !important;
-  }
-
-  .market-overview,
-  .scan-control{
-    grid-column:1/-1 !important;
-  }
-
-  .sentiment,
-  .feed-card{
-    grid-column:auto !important;
-    min-height:108px !important;
-  }
-
-  .sentiment .gauge{
-    width:72px;
-    height:72px;
-    margin:4px auto 2px;
-  }
-
-  .sentiment .gauge::after{
-    width:52px;
-    height:52px;
-  }
-
-  .sentiment .gauge-inner b{
-    font-size:14px;
-  }
-
-  .middle-grid.chart-free{
-    display:flex !important;
-    flex-direction:column;
-  }
-
-  .middle-grid.chart-free .scalp-panel{order:1}
-  .middle-grid.chart-free .signal-workspace{order:2}
-  .middle-grid.chart-free .key-levels{order:3}
-
-  .key-levels{
-    min-height:auto !important;
-  }
-
-  .compact-levels{
-    grid-template-columns:1fr 1fr !important;
-    gap:4px 10px !important;
-  }
-
-  .compact-levels>span{
-    min-height:31px;
+@media (prefers-reduced-motion: reduce){
+  *{
+    scroll-behavior:auto !important;
   }
 }
