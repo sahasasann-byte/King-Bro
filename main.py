@@ -3192,6 +3192,9 @@ async def stock_feed_loop():
 
     finally:
         scanner_state["stock_scan_running"] = False
+        # Never leave the UI stuck in STARTING after the stock feed exits.
+        # A dead/cancelled feed is not an enabled scanner.
+        scanner_state["stock_scan_enabled"] = False
 
         await broadcast({
             "type": "stock_scanner_status",
@@ -3731,6 +3734,8 @@ async def start_stock_scanner():
         )
 
     scanner_state["stock_scan_enabled"] = True
+    scanner_state["stock_scan_running"] = False
+    scanner_state["stock_last_error"] = None
 
     if stock_feed_task and not stock_feed_task.done():
         return {
