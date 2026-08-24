@@ -137,59 +137,70 @@ function CandleChart({ candles = [], latestLtp }) {
 }
 
 function ScannerControl({ scanners, busy, action, engineAction }) {
-  const indexRunning = Boolean(scanners?.index?.enabled);
+  const indexEnabled = Boolean(scanners?.index?.enabled);
   const stockEnabled = Boolean(scanners?.stocks?.enabled);
   const stockRunning = Boolean(scanners?.stocks?.running);
-  const engineRunning = indexRunning && stockEnabled;
+  const engineEnabled = indexEnabled && stockEnabled;
+
   const resolved = Number(scanners?.stocks?.resolved || 0);
   const unresolved = Number(scanners?.stocks?.unresolved || 0);
   const stockError = scanners?.stocks?.last_error || "";
 
-  const Row = ({ label, sub, running, startPath, stopPath, keyName }) => {
-    const changing = busy === `${keyName}-start` || busy === `${keyName}-stop`;
-
-    return (
-      <div className="scan-row">
-        <div>
-          <b>{label}</b>
-          <small>{sub}</small>
-        </div>
-
-        <button
-          type="button"
-          className={`toggle-visual toggle-button ${running ? "on" : ""}`}
-          disabled={Boolean(busy)}
-          aria-label={`${label} ${running ? "stop" : "start"}`}
-          onClick={() =>
-            action(
-              running ? stopPath : startPath,
-              `${keyName}-${running ? "stop" : "start"}`
-            )
-          }
-        >
-          <i />
-        </button>
-
-        <button
-          type="button"
-          className="scan-start"
-          disabled={Boolean(busy) || running}
-          onClick={() => action(startPath, `${keyName}-start`)}
-        >
-          <Play size={13}/> {busy === `${keyName}-start` ? "..." : "START"}
-        </button>
-
-        <button
-          type="button"
-          className="scan-stop"
-          disabled={Boolean(busy) || !running}
-          onClick={() => action(stopPath, `${keyName}-stop`)}
-        >
-          <Square size={12}/> {busy === `${keyName}-stop` ? "..." : "STOP"}
-        </button>
+  const Row = ({
+    label,
+    sub,
+    enabled,
+    live,
+    startPath,
+    stopPath,
+    keyName,
+    stateText,
+  }) => (
+    <div className="scan-row">
+      <div>
+        <b>{label}</b>
+        <small>{sub}</small>
+        <small className={live ? "pos" : enabled ? "" : "neg"}>
+          {stateText}
+        </small>
       </div>
-    );
-  };
+
+      <button
+        type="button"
+        className={`toggle-visual toggle-button ${enabled ? "on" : ""}`}
+        disabled={Boolean(busy)}
+        aria-label={`${label} ${enabled ? "stop" : "start"}`}
+        onClick={() =>
+          action(
+            enabled ? stopPath : startPath,
+            `${keyName}-${enabled ? "stop" : "start"}`
+          )
+        }
+      >
+        <i />
+      </button>
+
+      <button
+        type="button"
+        className="scan-start"
+        disabled={Boolean(busy) || enabled}
+        onClick={() => action(startPath, `${keyName}-start`)}
+      >
+        <Play size={13}/>
+        {busy === `${keyName}-start` ? "STARTING…" : "START"}
+      </button>
+
+      <button
+        type="button"
+        className="scan-stop"
+        disabled={Boolean(busy) || !enabled}
+        onClick={() => action(stopPath, `${keyName}-stop`)}
+      >
+        <Square size={12}/>
+        {busy === `${keyName}-stop` ? "STOPPING…" : "STOP"}
+      </button>
+    </div>
+  );
 
   return (
     <div className="scan-control glass-card">
@@ -197,14 +208,14 @@ function ScannerControl({ scanners, busy, action, engineAction }) {
         <div className="box-title">SCAN CONTROLS</div>
 
         <div className="engine-master">
-          <span className={engineRunning ? "engine-on" : "engine-off"}>
-            {engineRunning ? "ENGINE ON" : "ENGINE PARTIAL/OFF"}
+          <span className={engineEnabled ? "engine-on" : "engine-off"}>
+            {engineEnabled ? "ENGINE ON" : "ENGINE OFF"}
           </span>
 
           <button
             type="button"
             className="engine-start"
-            disabled={Boolean(busy) || engineRunning}
+            disabled={Boolean(busy) || engineEnabled}
             onClick={() => engineAction("start")}
           >
             <Play size={12}/> ENGINE START
@@ -213,7 +224,7 @@ function ScannerControl({ scanners, busy, action, engineAction }) {
           <button
             type="button"
             className="engine-stop"
-            disabled={Boolean(busy) || (!indexRunning && !stockEnabled)}
+            disabled={Boolean(busy) || (!indexEnabled && !stockEnabled)}
             onClick={() => engineAction("stop")}
           >
             <Square size={11}/> ENGINE STOP
@@ -224,7 +235,9 @@ function ScannerControl({ scanners, busy, action, engineAction }) {
       <Row
         label="NIFTY + SENSEX"
         sub="Index signal engine"
-        running={indexRunning}
+        enabled={indexEnabled}
+        live={indexEnabled}
+        stateText={indexEnabled ? "● RUNNING" : "● STOPPED"}
         startPath="/api/scanners/index/start"
         stopPath="/api/scanners/index/stop"
         keyName="index"
@@ -233,7 +246,17 @@ function ScannerControl({ scanners, busy, action, engineAction }) {
       <Row
         label="STOCK SCAN"
         sub="Fixed 40-stock universe"
-        running={stockRunning}
+        enabled={stockEnabled}
+        live={stockRunning}
+        stateText={
+          stockRunning
+            ? `● LIVE · ${resolved}/40`
+            : stockError
+              ? "● ERROR"
+              : stockEnabled
+                ? "● STARTING"
+                : "● STOPPED"
+        }
         startPath="/api/scanners/stocks/start"
         stopPath="/api/scanners/stocks/stop"
         keyName="stock"
@@ -244,9 +267,15 @@ function ScannerControl({ scanners, busy, action, engineAction }) {
         <span>Resolved <b>{resolved}</b></span>
         <span>Unresolved <b>{unresolved}</b></span>
         <span>
-          Status
+          Status{" "}
           <b className={stockRunning ? "pos" : stockError ? "neg" : ""}>
-            {stockRunning ? " LIVE" : stockError ? " ERROR" : stockEnabled ? " STARTING" : " STOP"}
+            {stockRunning
+              ? "LIVE"
+              : stockError
+                ? "ERROR"
+                : stockEnabled
+                  ? "STARTING"
+                  : "STOP"}
           </b>
         </span>
       </div>
@@ -1109,6 +1138,26 @@ function App() {
     if(scannerBusy) return;
 
     const isStart = key.endsWith("-start");
+
+    if(
+      key === "stock-start" &&
+      scanners?.stocks?.enabled
+    ){
+      setMessage(
+        scanners?.stocks?.running
+          ? "Stock scanner is already LIVE."
+          : "Stock scanner is already STARTING. Please wait."
+      );
+      return;
+    }
+
+    if(
+      key === "index-start" &&
+      scanners?.index?.enabled
+    ){
+      setMessage("Index scanner is already RUNNING.");
+      return;
+    }
     const isStock = key.startsWith("stock-");
     const isIndex = key.startsWith("index-");
 
@@ -1126,6 +1175,7 @@ function App() {
             ...(prev?.stocks || {}),
             enabled:isStart,
             running:isStart ? Boolean(prev?.stocks?.running) : false,
+            last_error:null,
           }
         : prev?.stocks,
     }));
