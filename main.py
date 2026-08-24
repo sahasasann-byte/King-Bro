@@ -957,13 +957,23 @@ def _direction_score(snapshot, direction):
     reasons = []
     blockers = []
 
-    # 5m EMA21 requires 21 completed 5m bars.
+    # FAST-SAFE SCALPING WARM-UP
+    #
+    # Do not block the whole signal engine for 21 x 5m bars (105 min)
+    # and 9 x 15m bars (135 min). For a scalping terminal that made
+    # every fresh Render restart look "dead" for far too long.
+    #
+    # Minimum context:
+    #   - 22 completed 1m bars => EMA21 + RSI/Williams context available
+    #   - 3 completed 5m bars  => real 5m price-action context available
+    #
+    # 5m EMA21 and 15m confirmations remain OPTIONAL score boosters.
+    # They start contributing automatically as those bars accumulate.
+    # No synthetic/history values are invented.
     if one["count"] < 22:
         blockers.append(f"1m warm-up {one['count']}/22")
-    if five["count"] < 21:
-        blockers.append(f"5m warm-up {five['count']}/21")
-    if fifteen["count"] < 9:
-        blockers.append(f"15m warm-up {fifteen['count']}/9")
+    if five["count"] < 3:
+        blockers.append(f"5m warm-up {five['count']}/3")
 
     if five["price_action"] == direction:
         score += 20
@@ -1274,6 +1284,18 @@ async def _evaluate_signal(symbol):
         "indicators": snap,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "mode": "SIGNAL_ONLY",
+        "readiness": {
+            "minimum_ready": not bool(blockers),
+            "one_minute_count": snap["one_minute"]["count"],
+            "five_minute_count": snap["five_minute"]["count"],
+            "fifteen_minute_count": snap["fifteen_minute"]["count"],
+            "daily_levels_ready": bool((snap.get("daily_levels") or {}).get("ready")),
+            "five_minute_levels_ready": bool((snap.get("five_minute_levels") or {}).get("ready")),
+            "note": (
+                "Daily R/S levels require real previous-session candles. "
+                "5M levels use the last completed real 5M candle."
+            ),
+        },
         "option_contract": None,
         "option_ltp": None,
         "entry": None,
@@ -3916,6 +3938,40 @@ async def get_signals():
         "signals": signals,
         "history": list(signal_history),
         "scans": list(SIGNAL_SYMBOLS),
+    }
+
+
+@app.get("/api/signals/readiness")
+async def signal_readiness():
+    items = {}
+    for symbol in SIGNAL_SYMBOLS:
+        snap = _indicator_snapshot(symbol)
+        one_count = snap["one_minute"]["count"]
+        five_count = snap["five_minute"]["count"]
+        fifteen_count = snap["fifteen_minute"]["count"]
+        blockers = []
+        if one_count < 22:
+            blockers.append(f"1m {one_count}/22")
+        if five_count < 3:
+            blockers.append(f"5m {five_count}/3")
+        items[symbol] = {
+            "ready": not blockers,
+            "blockers": blockers,
+            "one_minute_count": one_count,
+            "five_minute_count": five_count,
+            "fifteen_minute_count": fifteen_count,
+            "daily_levels_ready": bool((snap.get("daily_levels") or {}).get("ready")),
+            "five_minute_levels_ready": bool((snap.get("five_minute_levels") or {}).get("ready")),
+        }
+    return {
+        "mode": "FAST_SAFE_LIVE_WARMUP",
+        "minimum": {
+            "one_minute_completed": 22,
+            "five_minute_completed": 3,
+            "fifteen_minute": "optional confirmation",
+        },
+        "items": items,
+        "mock_data": False,
     }
 
 
