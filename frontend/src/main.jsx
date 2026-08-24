@@ -136,40 +136,122 @@ function CandleChart({ candles = [], latestLtp }) {
   );
 }
 
-function ScannerControl({ scanners, busy, action }) {
-  const indexRunning = !!scanners?.index?.enabled;
-  const stockRunning = !!scanners?.stocks?.running;
+function ScannerControl({ scanners, busy, action, engineAction }) {
+  const indexRunning = Boolean(scanners?.index?.enabled);
+  const stockEnabled = Boolean(scanners?.stocks?.enabled);
+  const stockRunning = Boolean(scanners?.stocks?.running);
+  const engineRunning = indexRunning && stockEnabled;
+  const resolved = Number(scanners?.stocks?.resolved || 0);
+  const unresolved = Number(scanners?.stocks?.unresolved || 0);
+  const stockError = scanners?.stocks?.last_error || "";
 
-  const Row = ({ label, sub, running, startPath, stopPath, keyName }) => (
-    <div className="scan-row">
-      <div>
-        <b>{label}</b>
-        <small>{sub}</small>
+  const Row = ({ label, sub, running, startPath, stopPath, keyName }) => {
+    const changing = busy === `${keyName}-start` || busy === `${keyName}-stop`;
+
+    return (
+      <div className="scan-row">
+        <div>
+          <b>{label}</b>
+          <small>{sub}</small>
+        </div>
+
+        <button
+          type="button"
+          className={`toggle-visual toggle-button ${running ? "on" : ""}`}
+          disabled={Boolean(busy)}
+          aria-label={`${label} ${running ? "stop" : "start"}`}
+          onClick={() =>
+            action(
+              running ? stopPath : startPath,
+              `${keyName}-${running ? "stop" : "start"}`
+            )
+          }
+        >
+          <i />
+        </button>
+
+        <button
+          type="button"
+          className="scan-start"
+          disabled={Boolean(busy) || running}
+          onClick={() => action(startPath, `${keyName}-start`)}
+        >
+          <Play size={13}/> {busy === `${keyName}-start` ? "..." : "START"}
+        </button>
+
+        <button
+          type="button"
+          className="scan-stop"
+          disabled={Boolean(busy) || !running}
+          onClick={() => action(stopPath, `${keyName}-stop`)}
+        >
+          <Square size={12}/> {busy === `${keyName}-stop` ? "..." : "STOP"}
+        </button>
       </div>
-      <div className={`toggle-visual ${running ? "on" : ""}`}><i /></div>
-      <button className="scan-start" disabled={busy===`${keyName}-start`}
-        onClick={() => action(startPath, `${keyName}-start`)}>
-        <Play size={13}/> START
-      </button>
-      <button className="scan-stop" disabled={busy===`${keyName}-stop`}
-        onClick={() => action(stopPath, `${keyName}-stop`)}>
-        <Square size={12}/> STOP
-      </button>
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="scan-control glass-card">
-      <div className="box-title">SCAN CONTROLS</div>
-      <Row label="NIFTY + SENSEX" sub="Index signal engine" running={indexRunning}
-        startPath="/api/scanners/index/start" stopPath="/api/scanners/index/stop" keyName="index" />
-      <Row label="STOCK SCAN" sub="Fixed 40-stock universe" running={stockRunning}
-        startPath="/api/scanners/stocks/start" stopPath="/api/scanners/stocks/stop" keyName="stock" />
-      <div className="scan-stats">
-        <span>Universe <b>40</b></span>
-        <span>Resolved <b>{scanners?.stocks?.resolved ?? 0}</b></span>
-        <span>Status <b className={stockRunning ? "pos" : "neg"}>{stockRunning ? "LIVE" : "STOP"}</b></span>
+      <div className="scan-headline">
+        <div className="box-title">SCAN CONTROLS</div>
+
+        <div className="engine-master">
+          <span className={engineRunning ? "engine-on" : "engine-off"}>
+            {engineRunning ? "ENGINE ON" : "ENGINE PARTIAL/OFF"}
+          </span>
+
+          <button
+            type="button"
+            className="engine-start"
+            disabled={Boolean(busy) || engineRunning}
+            onClick={() => engineAction("start")}
+          >
+            <Play size={12}/> ENGINE START
+          </button>
+
+          <button
+            type="button"
+            className="engine-stop"
+            disabled={Boolean(busy) || (!indexRunning && !stockEnabled)}
+            onClick={() => engineAction("stop")}
+          >
+            <Square size={11}/> ENGINE STOP
+          </button>
+        </div>
       </div>
+
+      <Row
+        label="NIFTY + SENSEX"
+        sub="Index signal engine"
+        running={indexRunning}
+        startPath="/api/scanners/index/start"
+        stopPath="/api/scanners/index/stop"
+        keyName="index"
+      />
+
+      <Row
+        label="STOCK SCAN"
+        sub="Fixed 40-stock universe"
+        running={stockRunning}
+        startPath="/api/scanners/stocks/start"
+        stopPath="/api/scanners/stocks/stop"
+        keyName="stock"
+      />
+
+      <div className="scan-stats">
+        <span>Universe <b>{scanners?.stocks?.universe_count ?? 40}</b></span>
+        <span>Resolved <b>{resolved}</b></span>
+        <span>Unresolved <b>{unresolved}</b></span>
+        <span>
+          Status
+          <b className={stockRunning ? "pos" : stockError ? "neg" : ""}>
+            {stockRunning ? " LIVE" : stockError ? " ERROR" : stockEnabled ? " STARTING" : " STOP"}
+          </b>
+        </span>
+      </div>
+
+      {stockError && <div className="scanner-inline-error">{stockError}</div>}
     </div>
   );
 }
@@ -677,18 +759,55 @@ function StockTable({ items, onOrder }) {
 
 function RecentSignals({ history }) {
   return (
-    <div className="bottom-card glass-card">
-      <div className="box-title">RECENT SIGNALS</div>
-      {(history || []).slice(0,5).map((s,i) => (
-        <div className="recent-row" key={i}>
-          <span>{s.generated_at ? new Date(s.generated_at).toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"}) : "—"}</span>
-          <b>{s.symbol}</b>
-          <span className={s.direction==="CALL"||s.direction==="BUY" ? "pos":"neg"}>{s.direction}</span>
-          <span>{s.grade || "—"}</span>
-          <span>{s.score ?? "—"}</span>
+    <div className="bottom-card glass-card recent-history-card">
+      <div className="box-title-row">
+        <div className="box-title">RECENT SIGNALS / CALL HISTORY</div>
+        <small>INDEX + STOCK</small>
+      </div>
+
+      <div className="recent-history-head">
+        <span>TIME</span>
+        <span>SYMBOL</span>
+        <span>CALL</span>
+        <span>SCORE</span>
+        <span>ENTRY</span>
+        <span>SL</span>
+      </div>
+
+      {(history || []).slice(0,8).map((s,i) => (
+        <div className="recent-row recent-history-row" key={`${s?.symbol || "row"}-${i}`}>
+          <span>
+            {(s?.generated_at || s?.updated_at)
+              ? new Date(s.generated_at || s.updated_at).toLocaleTimeString(
+                  "en-IN",
+                  {hour:"2-digit",minute:"2-digit"}
+                )
+              : "—"}
+          </span>
+
+          <b>{s?.symbol || "—"}</b>
+
+          <span className={
+            s?.direction==="CALL" || s?.direction==="BUY"
+              ? "pos"
+              : s?.direction==="PUT" || s?.direction==="SELL"
+                ? "neg"
+                : ""
+          }>
+            {s?.direction || "WAIT"}
+          </span>
+
+          <span>{s?.score ?? "—"}</span>
+          <span>{s?.entry == null ? "—" : n(s.entry)}</span>
+          <span>{s?.stop_loss == null ? "—" : n(s.stop_loss)}</span>
         </div>
       ))}
-      {!(history || []).length && <div className="bottom-empty">No recent signals yet.</div>}
+
+      {!(history || []).length && (
+        <div className="bottom-empty">
+          No qualified calls yet. Scanner history will appear here.
+        </div>
+      )}
     </div>
   );
 }
@@ -769,6 +888,10 @@ function App() {
   const [scanners,setScanners] = React.useState({index:{enabled:true},stocks:{enabled:false,running:false}});
   const [scannerBusy,setScannerBusy] = React.useState("");
   const [signals,setSignals] = React.useState({"NIFTY 50":null,"SENSEX":null});
+  const [signalDetails,setSignalDetails] = React.useState({
+    "NIFTY 50": null,
+    "SENSEX": null,
+  });
   const [history,setHistory] = React.useState([]);
   const [stockSignals,setStockSignals] = React.useState([]);
   const [positions,setPositions] = React.useState([]);
@@ -818,7 +941,7 @@ function App() {
 
   const loadSignals = React.useCallback(async()=>{
     try {
-      const r = await fetch(API+"/api/signals");
+      const r = await fetch(API+"/api/signals", { cache:"no-store" });
       if(!r.ok) return;
       const d = await r.json();
       const s = d?.signals || {};
@@ -828,9 +951,35 @@ function App() {
   },[]);
 
 
+  const loadSignalDetails = React.useCallback(async()=>{
+    try {
+      const [niftyResponse, sensexResponse] = await Promise.all([
+        fetch(API+"/api/signals/NIFTY50", { cache:"no-store" }),
+        fetch(API+"/api/signals/SENSEX", { cache:"no-store" }),
+      ]);
+
+      const next = {};
+
+      if(niftyResponse.ok){
+        const d = await niftyResponse.json();
+        next["NIFTY 50"] = d;
+      }
+
+      if(sensexResponse.ok){
+        const d = await sensexResponse.json();
+        next["SENSEX"] = d;
+      }
+
+      if(Object.keys(next).length){
+        setSignalDetails(prev => ({...prev, ...next}));
+      }
+    } catch {}
+  },[]);
+
+
   const loadStocks = React.useCallback(async()=>{
     try {
-      const r = await fetch(API+"/api/stocks/signals/best?limit=8");
+      const r = await fetch(API+"/api/stocks/signals/best?limit=8", { cache:"no-store" });
       if(r.ok) {
         const d = await r.json();
         setStockSignals(Array.isArray(d?.items)?d.items:[]);
@@ -851,10 +1000,20 @@ function App() {
   },[status.broker_connected]);
 
   React.useEffect(()=>{
-    loadScanners(); loadSignals(); loadStocks();
-    const t=setInterval(()=>{loadScanners();loadSignals();loadStocks();},30000);
+    loadScanners();
+    loadSignals();
+    loadSignalDetails();
+    loadStocks();
+
+    const t=setInterval(()=>{
+      loadScanners();
+      loadSignals();
+      loadSignalDetails();
+      loadStocks();
+    },30000);
+
     return()=>clearInterval(t);
-  },[loadScanners,loadSignals,loadStocks]);
+  },[loadScanners,loadSignals,loadSignalDetails,loadStocks]);
 
   React.useEffect(()=>{
     if(!status.broker_connected) return;
@@ -888,7 +1047,19 @@ function App() {
           }
           if(m.type==="signal_update"||m.type==="signal_event"){
             const s=m.data;
-            if(s?.symbol==="NIFTY 50"||s?.symbol==="SENSEX") setSignals(p=>({...p,[s.symbol]:s}));
+            if(s?.symbol==="NIFTY 50"||s?.symbol==="SENSEX"){
+              setSignals(p=>({...p,[s.symbol]:s}));
+              if(s?.indicators){
+                setSignalDetails(p=>({
+                  ...p,
+                  [s.symbol]: {
+                    ...(p[s.symbol] || {}),
+                    signal: s,
+                    indicators: s.indicators,
+                  },
+                }));
+              }
+            }
           }
           if(m.type==="stock_signal_update"){
             const s=m.data;
@@ -919,13 +1090,55 @@ function App() {
     finally{setBusy(false);}
   }
 
+  async function refreshScannerBurst(includeStocks=false){
+    await loadScanners();
+    if(includeStocks) await loadStocks();
+
+    window.setTimeout(() => {
+      loadScanners();
+      if(includeStocks) loadStocks();
+    }, 1200);
+
+    window.setTimeout(() => {
+      loadScanners();
+      if(includeStocks) loadStocks();
+    }, 3500);
+  }
+
   async function scannerAction(path,key){
     if(scannerBusy) return;
+
+    const isStart = key.endsWith("-start");
+    const isStock = key.startsWith("stock-");
+    const isIndex = key.startsWith("index-");
+
     setScannerBusy(key);
-    setMessage("");
+    setMessage(isStart ? "Starting scanner…" : "Stopping scanner…");
+
+    // Immediate visual reaction; authoritative state is refreshed below.
+    setScanners(prev => ({
+      ...prev,
+      index: isIndex
+        ? {...(prev?.index || {}), enabled:isStart}
+        : prev?.index,
+      stocks: isStock
+        ? {
+            ...(prev?.stocks || {}),
+            enabled:isStart,
+            running:isStart ? Boolean(prev?.stocks?.running) : false,
+          }
+        : prev?.stocks,
+    }));
+
     try{
-      const r=await fetch(API+path,{method:"POST",cache:"no-store"});
+      const r=await fetch(API+path,{
+        method:"POST",
+        cache:"no-store",
+        headers:{"Accept":"application/json"}
+      });
+
       const d=await r.json();
+
       if(!r.ok){
         const detail =
           typeof d?.detail === "string"
@@ -933,14 +1146,59 @@ function App() {
             : d?.detail?.message || d?.message || `Scanner request failed (${r.status})`;
         throw new Error(detail);
       }
+
       setMessage(
         d?.message ||
-        (key.endsWith("-start") ? "Scanner started." : "Scanner stopped.")
+        (isStart ? "Scanner started." : "Scanner stopped.")
       );
-      await loadScanners();
-      if(key.startsWith("stock-")) await loadStocks();
+
+      await refreshScannerBurst(isStock);
+      if(isIndex){
+        await loadSignals();
+        await loadSignalDetails();
+      }
     }catch(e){
       setMessage(`Scanner error: ${e?.message||e}`);
+      await loadScanners();
+    }finally{
+      setScannerBusy("");
+    }
+  }
+
+  async function engineAction(mode){
+    if(scannerBusy) return;
+
+    const start = mode === "start";
+    setScannerBusy(`engine-${mode}`);
+    setMessage(start ? "Starting INDEX + STOCK engine…" : "Stopping INDEX + STOCK engine…");
+
+    try{
+      const paths = start
+        ? ["/api/scanners/index/start", "/api/scanners/stocks/start"]
+        : ["/api/scanners/stocks/stop", "/api/scanners/index/stop"];
+
+      for(const path of paths){
+        const r = await fetch(API+path,{
+          method:"POST",
+          cache:"no-store",
+          headers:{"Accept":"application/json"}
+        });
+        const d = await r.json();
+        if(!r.ok){
+          const detail =
+            typeof d?.detail === "string"
+              ? d.detail
+              : d?.detail?.message || d?.message || `Engine request failed (${r.status})`;
+          throw new Error(detail);
+        }
+      }
+
+      setMessage(start ? "INDEX + STOCK engine started." : "INDEX + STOCK engine stopped.");
+      await refreshScannerBurst(true);
+      await loadSignals();
+      await loadSignalDetails();
+    }catch(e){
+      setMessage(`Engine error: ${e?.message||e}`);
       await loadScanners();
     }finally{
       setScannerBusy("");
@@ -1002,7 +1260,36 @@ function App() {
   }
 
   const showLogin=!status.feed_connected||!!loginError;
-  const niftySignal=signals["NIFTY 50"];
+  const niftySignal = signals["NIFTY 50"];
+  const niftyDisplaySnapshot =
+    niftySignal ||
+    (signalDetails["NIFTY 50"]?.indicators
+      ? { indicators: signalDetails["NIFTY 50"].indicators }
+      : null);
+
+  const combinedHistory = React.useMemo(() => {
+    const rows = [
+      ...(Array.isArray(history) ? history : []),
+      ...(Array.isArray(stockSignals) ? stockSignals : []),
+    ];
+
+    const seen = new Set();
+
+    return rows
+      .filter(Boolean)
+      .sort((a,b) => {
+        const ta = Date.parse(a?.generated_at || a?.updated_at || 0) || 0;
+        const tb = Date.parse(b?.generated_at || b?.updated_at || 0) || 0;
+        return tb - ta;
+      })
+      .filter((row) => {
+        const key = `${row?.symbol || ""}|${row?.direction || ""}|${row?.generated_at || row?.updated_at || ""}`;
+        if(seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0,20);
+  }, [history, stockSignals]);
 
   return (
     <div className="terminal-shell">
@@ -1046,7 +1333,7 @@ function App() {
             </div>
           </div>
 
-          <div ref={sectionRefs.index} className="scroll-target"><ScannerControl scanners={scanners} busy={scannerBusy} action={scannerAction}/></div>
+          <div ref={sectionRefs.index} className="scroll-target"><ScannerControl scanners={scanners} busy={scannerBusy} action={scannerAction} engineAction={engineAction}/></div>
 
           <SentimentGauge signals={signals}/>
 
@@ -1139,7 +1426,7 @@ function App() {
             </div>
           </div>
 
-          <KeyLevels snapshot={niftySignal}/>
+          <KeyLevels snapshot={niftyDisplaySnapshot}/>
           <ScalpingSignal
             indexSignals={signals}
             stockSignals={stockSignals}
@@ -1148,7 +1435,7 @@ function App() {
           />
         </section>
 
-        <IndicatorStrip snapshot={niftySignal}/>
+        <IndicatorStrip snapshot={niftyDisplaySnapshot}/>
 
         <section className="bottom-grid scroll-target">
           <div ref={sectionRefs.stocks} className="scroll-target"><div className="bottom-card glass-card scanner-summary">
@@ -1164,7 +1451,7 @@ function App() {
               </span>
             </div>
           </div></div>
-          <RecentSignals history={history}/>
+          <RecentSignals history={combinedHistory}/>
           <div ref={sectionRefs.positions} className="scroll-target"><Positions positions={positions} loading={positionsLoading} refresh={loadPositions}
             squareOff={squareOff} squareOffAll={squareOffAll}/></div>
         </section>
