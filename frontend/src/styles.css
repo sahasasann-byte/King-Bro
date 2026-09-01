@@ -1677,3 +1677,26 @@ body{
     display:none;
   }
 }
+
+/* LIGHT Telegram check: no background polling; one request only when tapped. */
+.telegram-check{
+  margin-top:10px;
+  min-height:34px;
+  padding:7px 11px;
+  border:1px solid rgba(69,226,255,.28);
+  border-radius:10px;
+  background:rgba(7,52,83,.48);
+  color:#d9f7ff;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:6px;
+  font-size:11px;
+  font-weight:800;
+  letter-spacing:.35px;
+  cursor:pointer;
+}
+.telegram-check:hover{border-color:rgba(58,244,191,.55)}
+.telegram-check.checking{opacity:.7;cursor:wait}
+.telegram-check.ok{color:#35f2a4;border-color:rgba(53,242,164,.5)}
+.telegram-check.error{color:#ff7f91;border-color:rgba(255,127,145,.45)}

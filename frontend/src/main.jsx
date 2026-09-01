@@ -927,6 +927,7 @@ function App() {
   const [positionsLoading,setPositionsLoading] = React.useState(false);
   const [orderDraft,setOrderDraft] = React.useState(null);
   const [orderBusy,setOrderBusy] = React.useState(false);
+  const [telegramCheck,setTelegramCheck] = React.useState({state:"idle", text:"TELEGRAM CHECK"});
 
   const [activeSection,setActiveSection] = React.useState("dashboard");
   const [clockNow,setClockNow] = React.useState(Date.now());
@@ -1028,26 +1029,44 @@ function App() {
     finally{ setPositionsLoading(false); }
   },[status.broker_connected]);
 
+  // LIGHT MODE: WebSocket remains the primary live path. REST is only a
+  // low-frequency safety refresh, and it pauses while the tab is hidden.
+  // Signal/strategy calculations are unchanged.
   React.useEffect(()=>{
-    loadScanners();
-    loadSignals();
-    loadSignalDetails();
-    loadStocks();
-
-    const t=setInterval(()=>{
+    const refreshCore = ()=>{
+      if(document.visibilityState !== "visible") return;
       loadScanners();
       loadSignals();
-      loadSignalDetails();
       loadStocks();
-    },30000);
+    };
 
-    return()=>clearInterval(t);
+    refreshCore();
+    loadSignalDetails();
+
+    const coreTimer=setInterval(refreshCore,60000);
+    const detailTimer=setInterval(()=>{
+      if(document.visibilityState === "visible") loadSignalDetails();
+    },120000);
+
+    const onVisible=()=>{
+      if(document.visibilityState === "visible") refreshCore();
+    };
+    document.addEventListener("visibilitychange",onVisible);
+
+    return()=>{
+      clearInterval(coreTimer);
+      clearInterval(detailTimer);
+      document.removeEventListener("visibilitychange",onVisible);
+    };
   },[loadScanners,loadSignals,loadSignalDetails,loadStocks]);
 
   React.useEffect(()=>{
     if(!status.broker_connected) return;
-    loadPositions();
-    const t=setInterval(loadPositions,30000);
+    const refreshPositions=()=>{
+      if(document.visibilityState === "visible") loadPositions();
+    };
+    refreshPositions();
+    const t=setInterval(refreshPositions,60000);
     return()=>clearInterval(t);
   },[status.broker_connected,loadPositions]);
 
@@ -1105,6 +1124,36 @@ function App() {
     connect();
     return()=>{dead=true;clearInterval(ping);clearTimeout(retry);try{ws?.close()}catch{}};
   },[]);
+
+  async function checkTelegram(){
+    if(telegramCheck.state === "checking") return;
+    setTelegramCheck({state:"checking", text:"CHECKING…"});
+    try{
+      const statusResponse = await fetch(API+"/api/telegram/status", {cache:"no-store"});
+      const statusData = await statusResponse.json();
+      if(!statusResponse.ok) throw new Error(statusData?.detail || "Telegram status failed");
+      if(!statusData?.configured){
+        setTelegramCheck({state:"error", text:"NOT CONFIGURED"});
+        return;
+      }
+
+      const testResponse = await fetch(API+"/api/telegram/test", {
+        method:"POST",
+        cache:"no-store",
+        headers:{"Accept":"application/json"}
+      });
+      const testData = await testResponse.json();
+      if(!testResponse.ok){
+        const detail = typeof testData?.detail === "string" ? testData.detail : "Telegram test failed";
+        throw new Error(detail);
+      }
+      setTelegramCheck({state:"ok", text:"TELEGRAM OK ✓"});
+      setMessage("Telegram test message sent.");
+    }catch(e){
+      setTelegramCheck({state:"error", text:"TELEGRAM ERROR"});
+      setMessage(`Telegram: ${e?.message||e}`);
+    }
+  }
 
   async function connectBroker(e){
     e.preventDefault();
@@ -1399,6 +1448,15 @@ function App() {
               </form>
             )}
             {loginError && <div className="tiny-error">{loginError}</div>}
+            <button
+              type="button"
+              className={`telegram-check ${telegramCheck.state}`}
+              disabled={telegramCheck.state === "checking"}
+              onClick={checkTelegram}
+              title="Sends one Telegram test message"
+            >
+              <BellRing size={13}/> {telegramCheck.text}
+            </button>
           </div>
         </section>
 
