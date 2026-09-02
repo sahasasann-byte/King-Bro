@@ -168,7 +168,7 @@ function ScannerControl({ scanners, busy, action, engineAction }) {
       <button
         type="button"
         className={`toggle-visual toggle-button ${enabled ? "on" : ""}`}
-        disabled={Boolean(busy)}
+        disabled={busy === `${keyName}-start` || busy === `${keyName}-stop`}
         aria-label={`${label} ${enabled ? "stop" : "start"}`}
         onClick={() =>
           action(
@@ -183,8 +183,8 @@ function ScannerControl({ scanners, busy, action, engineAction }) {
       <button
         type="button"
         className="scan-start"
-        disabled={Boolean(busy) || enabled}
-        onClick={() => action(startPath, `${keyName}-start`)}
+        disabled={busy === `${keyName}-start` || enabled}
+        onClick={(e) => { e.preventDefault(); e.stopPropagation(); action(startPath, `${keyName}-start`); }}
       >
         <Play size={13}/>
         {busy === `${keyName}-start` ? "STARTING…" : "START"}
@@ -193,8 +193,8 @@ function ScannerControl({ scanners, busy, action, engineAction }) {
       <button
         type="button"
         className="scan-stop"
-        disabled={Boolean(busy) || !enabled}
-        onClick={() => action(stopPath, `${keyName}-stop`)}
+        disabled={busy === `${keyName}-stop` || !enabled}
+        onClick={(e) => { e.preventDefault(); e.stopPropagation(); action(stopPath, `${keyName}-stop`); }}
       >
         <Square size={12}/>
         {busy === `${keyName}-stop` ? "STOPPING…" : "STOP"}
@@ -1184,7 +1184,9 @@ function App() {
   }
 
   async function scannerAction(path,key){
-    if(scannerBusy) return;
+    // Lock only this scanner action. A stale/hung action must never disable
+    // every scanner control on the dashboard.
+    if(scannerBusy === key) return;
 
     const isStart = key.endsWith("-start");
 
@@ -1230,11 +1232,19 @@ function App() {
     }));
 
     try{
-      const r=await fetch(API+path,{
-        method:"POST",
-        cache:"no-store",
-        headers:{"Accept":"application/json"}
-      });
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 12000);
+      let r;
+      try {
+        r=await fetch(API+path,{
+          method:"POST",
+          cache:"no-store",
+          headers:{"Accept":"application/json"},
+          signal: controller.signal,
+        });
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
 
       const d=await r.json();
 
@@ -1257,7 +1267,10 @@ function App() {
         await loadSignalDetails();
       }
     }catch(e){
-      setMessage(`Scanner error: ${e?.message||e}`);
+      const msg = e?.name === "AbortError"
+        ? "Scanner request timed out. Please try again."
+        : (e?.message || e);
+      setMessage(`Scanner error: ${msg}`);
       await loadScanners();
     }finally{
       setScannerBusy("");

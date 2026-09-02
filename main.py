@@ -255,11 +255,16 @@ telegram_state = {
     "last_sent_at": None,
     "last_error": None,
     "sent_count": 0,
+    "failed_count": 0,
+    "last_attempt_at": None,
+    "last_skip_reason": None,
 }
 
 # key -> last alert timestamp. Prevents repeated alerts for the same setup.
 telegram_alert_cache: dict[str, float] = {}
 TELEGRAM_ALERT_COOLDOWN_SECONDS = 15 * 60
+TELEGRAM_SEND_RETRIES = 3
+TELEGRAM_RETRY_DELAY_SECONDS = 1.25
 
 
 def _telegram_signal_key(signal: dict[str, Any]) -> str:
@@ -344,12 +349,23 @@ def _telegram_send_sync(message: str):
 
 
 async def _maybe_send_telegram_signal(signal: dict[str, Any]):
-    # Only final actionable A+/STRONG signals, after option confirmation.
+    """Deliver an already-qualified signal to Telegram.
+
+    IMPORTANT: this function deliberately does not change the trading strategy.
+    Eligibility remains exactly the same: final actionable A+/STRONG only.
+    The changes here are delivery reliability + diagnostics only.
+    """
+    symbol = str(signal.get("symbol") or "-")
+    grade = signal.get("grade")
+
     if not telegram_state["enabled"]:
+        telegram_state["last_skip_reason"] = "telegram_disabled"
         return False
     if not signal.get("actionable"):
+        telegram_state["last_skip_reason"] = f"{symbol}:not_actionable:{grade}"
         return False
-    if signal.get("grade") not in {"A+", "STRONG"}:
+    if grade not in {"A+", "STRONG"}:
+        telegram_state["last_skip_reason"] = f"{symbol}:grade_not_alertable:{grade}"
         return False
 
     key = _telegram_signal_key(signal)
@@ -357,18 +373,34 @@ async def _maybe_send_telegram_signal(signal: dict[str, Any]):
     previous_ts = telegram_alert_cache.get(key)
 
     if previous_ts and (now_ts - previous_ts) < TELEGRAM_ALERT_COOLDOWN_SECONDS:
+        telegram_state["last_skip_reason"] = f"{symbol}:cooldown"
         return False
 
-    try:
-        await asyncio.to_thread(_telegram_send_sync, _telegram_message(signal))
-        telegram_alert_cache[key] = now_ts
-        telegram_state["last_sent_at"] = datetime.now(timezone.utc).isoformat()
-        telegram_state["last_error"] = None
-        telegram_state["sent_count"] += 1
-        return True
-    except Exception as exc:
-        telegram_state["last_error"] = f"{type(exc).__name__}: {exc}"
-        return False
+    message = _telegram_message(signal)
+    last_exc = None
+    for attempt in range(1, TELEGRAM_SEND_RETRIES + 1):
+        telegram_state["last_attempt_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            await asyncio.to_thread(_telegram_send_sync, message)
+            telegram_alert_cache[key] = datetime.now(timezone.utc).timestamp()
+            telegram_state["last_sent_at"] = datetime.now(timezone.utc).isoformat()
+            telegram_state["last_error"] = None
+            telegram_state["last_skip_reason"] = None
+            telegram_state["sent_count"] += 1
+            print(f"[TELEGRAM_SENT] {symbol} {signal.get('direction')} {grade} score={signal.get('score')} attempt={attempt}", flush=True)
+            return True
+        except Exception as exc:
+            last_exc = exc
+            telegram_state["last_error"] = f"{type(exc).__name__}: {exc}"
+            print(f"[TELEGRAM_SEND_FAILED] {symbol} attempt={attempt}/{TELEGRAM_SEND_RETRIES}: {type(exc).__name__}: {exc}", flush=True)
+            if attempt < TELEGRAM_SEND_RETRIES:
+                await asyncio.sleep(TELEGRAM_RETRY_DELAY_SECONDS * attempt)
+
+    telegram_state["failed_count"] += 1
+    telegram_state["last_skip_reason"] = f"{symbol}:delivery_failed_after_retries"
+    if last_exc is not None:
+        telegram_state["last_error"] = f"{type(last_exc).__name__}: {last_exc}"
+    return False
 
 
 @app.get("/api/telegram/status")
