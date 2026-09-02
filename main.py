@@ -3848,6 +3848,7 @@ async def connect_kotak(
 ):
     global neo_client
     global feed_task
+    global stock_feed_task
 
 
     if not body.totp.isdigit():
@@ -3904,6 +3905,29 @@ async def connect_kotak(
             )
         )
 
+        # -----------------------------------------
+        # Auto-start stock scanner after successful
+        # Kotak authentication. This changes only
+        # scanner lifecycle, not signal strategy.
+        # -----------------------------------------
+        scanner_state["stock_scan_enabled"] = True
+        scanner_state["stock_last_error"] = None
+
+        if stock_feed_task is None or stock_feed_task.done():
+            scanner_state["stock_scan_running"] = False
+            stock_feed_task = asyncio.create_task(
+                stock_feed_loop()
+            )
+            print(
+                f"[STOCK_SCANNER_AUTO_START] starting fixed "
+                f"{len(STOCK_UNIVERSE)}-stock universe after Kotak connect",
+                flush=True,
+            )
+        else:
+            print(
+                "[STOCK_SCANNER_AUTO_START] stock scanner already running",
+                flush=True,
+            )
 
         return {
             "ok":
@@ -3911,7 +3935,10 @@ async def connect_kotak(
 
             "message":
                 "Kotak authenticated. "
-                "Index live feed starting.",
+                "Index live feed and stock scanner starting.",
+
+            "scanner_state":
+                scanner_state,
         }
 
 
