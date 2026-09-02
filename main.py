@@ -268,11 +268,17 @@ TELEGRAM_RETRY_DELAY_SECONDS = 1.25
 
 
 def _telegram_signal_key(signal: dict[str, Any]) -> str:
+    """Return the cooldown identity for an alert setup.
+
+    Grade is intentionally NOT part of the key. A STRONG -> A+ (or A+ ->
+    STRONG) reclassification for the same symbol/direction/contract is still
+    the same trade idea during the cooldown window and must not generate a
+    duplicate Telegram alert.
+    """
     contract = signal.get("option_contract") or {}
     return "|".join([
         str(signal.get("symbol") or ""),
         str(signal.get("direction") or ""),
-        str(signal.get("grade") or ""),
         str(contract.get("instrument_token") or contract.get("display_symbol") or ""),
     ])
 
@@ -3848,7 +3854,6 @@ async def connect_kotak(
 ):
     global neo_client
     global feed_task
-    global stock_feed_task
 
 
     if not body.totp.isdigit():
@@ -3905,29 +3910,6 @@ async def connect_kotak(
             )
         )
 
-        # -----------------------------------------
-        # Auto-start stock scanner after successful
-        # Kotak authentication. This changes only
-        # scanner lifecycle, not signal strategy.
-        # -----------------------------------------
-        scanner_state["stock_scan_enabled"] = True
-        scanner_state["stock_last_error"] = None
-
-        if stock_feed_task is None or stock_feed_task.done():
-            scanner_state["stock_scan_running"] = False
-            stock_feed_task = asyncio.create_task(
-                stock_feed_loop()
-            )
-            print(
-                f"[STOCK_SCANNER_AUTO_START] starting fixed "
-                f"{len(STOCK_UNIVERSE)}-stock universe after Kotak connect",
-                flush=True,
-            )
-        else:
-            print(
-                "[STOCK_SCANNER_AUTO_START] stock scanner already running",
-                flush=True,
-            )
 
         return {
             "ok":
@@ -3935,10 +3917,7 @@ async def connect_kotak(
 
             "message":
                 "Kotak authenticated. "
-                "Index live feed and stock scanner starting.",
-
-            "scanner_state":
-                scanner_state,
+                "Index live feed starting.",
         }
 
 
