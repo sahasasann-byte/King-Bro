@@ -10,7 +10,7 @@ class Settings(BaseSettings):
 
     # Reliability only; trading strategy thresholds/filters are unchanged.
     KINGBRO_KEEPALIVE_ENABLED: bool = True
-    KINGBRO_KEEPALIVE_INTERVAL_SECONDS: int = 480
+    KINGBRO_KEEPALIVE_INTERVAL_SECONDS: int = 300
     KINGBRO_FEED_STALE_SECONDS: int = 90
     KINGBRO_FEED_RESTART_COOLDOWN_SECONDS: int = 60
     KINGBRO_OPTION_CONFIRM_TIMEOUT_SECONDS: int = 30

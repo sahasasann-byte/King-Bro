@@ -4,6 +4,7 @@ import json
 import os
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from datetime import datetime, timezone, date, time as dt_time
 from zoneinfo import ZoneInfo
@@ -30,7 +31,7 @@ from config import settings
 
 app = FastAPI(
     title="King Bro Terminal API",
-    version="7.4.0",
+    version="7.5.0",
 )
 
 
@@ -121,6 +122,8 @@ background_tasks: set[asyncio.Task] = set()
 IST = ZoneInfo("Asia/Kolkata")
 
 runtime_state = {
+    "process_started_at": datetime.now(timezone.utc).isoformat(),
+    "process_boot_id": uuid.uuid4().hex[:12],
     "supervisor_running": False,
     "keepalive_running": False,
     "keepalive_enabled": bool(settings.KINGBRO_KEEPALIVE_ENABLED),
@@ -132,8 +135,24 @@ runtime_state = {
     "last_feed_restart_reason": None,
     "last_feed_stale_age_seconds": None,
     "auth_relogin_required": False,
+    "restart_login_required": False,
     "broker_authenticated_at": None,
     "feed_connected_at": None,
+    "last_runtime_notice_at": None,
+    "last_runtime_notice_error": None,
+}
+
+signal_diagnostics = {
+    "evaluations": 0,
+    "technical_actionable": 0,
+    "final_actionable": 0,
+    "option_filtered": 0,
+    "option_errors": 0,
+    "warming_up": 0,
+    "watch": 0,
+    "no_trade": 0,
+    "last_evaluation_at": None,
+    "last_by_symbol": {},
 }
 
 
@@ -381,6 +400,22 @@ def _telegram_send_sync(message: str):
         raise RuntimeError(f"Telegram API error: {data}")
 
     return data
+
+
+async def _send_runtime_telegram_notice(message: str):
+    """Operational notice only; never treated as a trading signal."""
+    if not telegram_state.get("configured"):
+        return False
+    try:
+        await asyncio.to_thread(_telegram_send_sync, message)
+        runtime_state["last_runtime_notice_at"] = datetime.now(timezone.utc).isoformat()
+        runtime_state["last_runtime_notice_error"] = None
+        print("[RUNTIME_TELEGRAM_NOTICE_SENT]", flush=True)
+        return True
+    except Exception as exc:
+        runtime_state["last_runtime_notice_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"[RUNTIME_TELEGRAM_NOTICE_FAILED] {type(exc).__name__}: {exc}", flush=True)
+        return False
 
 
 async def _maybe_send_telegram_signal(signal: dict[str, Any]):
@@ -633,6 +668,22 @@ def _restore_candle_state_sync():
 async def restore_candle_state_on_startup():
     await asyncio.to_thread(_restore_candle_state_sync)
     _start_runtime_supervisors()
+
+    # A new Python process cannot retain the authenticated NeoAPI object.
+    # Make this explicit instead of silently looking like a random logout.
+    if _market_hours_active():
+        runtime_state["restart_login_required"] = True
+        await set_status(
+            broker_connected=False,
+            feed_connected=False,
+            last_error="SERVER RESTARTED / TOTP LOGIN REQUIRED",
+        )
+        if telegram_state.get("configured"):
+            _spawn_background(_send_runtime_telegram_notice(
+                "⚠️ KING BRO backend restarted during market hours.\n"
+                "Kotak live session is not restored automatically.\n"
+                "Open KING BRO and enter the current TOTP once to resume NIFTY/SENSEX signals."
+            ))
 
 
 @app.on_event("shutdown")
@@ -1388,7 +1439,44 @@ async def _evaluate_signal(symbol):
 
     # V6: Technical signal first; real option confirmation only when
     # the technical setup is actionable. This keeps REST load controlled.
+    technical_actionable = bool(actionable)
     signal = await _attach_auto_option_to_signal(signal)
+
+    # Reliability diagnostics only — no scoring/filter changes.
+    signal_diagnostics["evaluations"] += 1
+    signal_diagnostics["last_evaluation_at"] = datetime.now(timezone.utc).isoformat()
+    if technical_actionable:
+        signal_diagnostics["technical_actionable"] += 1
+    final_grade = str(signal.get("grade") or "")
+    if signal.get("actionable"):
+        signal_diagnostics["final_actionable"] += 1
+    elif final_grade == "OPTION_FILTER":
+        signal_diagnostics["option_filtered"] += 1
+    elif final_grade == "OPTION_ERROR":
+        signal_diagnostics["option_errors"] += 1
+    elif final_grade == "WARMING_UP":
+        signal_diagnostics["warming_up"] += 1
+    elif final_grade == "WATCH":
+        signal_diagnostics["watch"] += 1
+    elif final_grade == "NO_TRADE":
+        signal_diagnostics["no_trade"] += 1
+
+    signal_diagnostics["last_by_symbol"][symbol] = {
+        "at": signal.get("generated_at"),
+        "direction": signal.get("direction"),
+        "score": signal.get("score"),
+        "grade": signal.get("grade"),
+        "actionable": bool(signal.get("actionable")),
+        "blockers": list(signal.get("blockers") or []),
+        "option_quality_score": signal.get("option_quality_score"),
+    }
+    print(
+        f"[SIGNAL_EVAL] {symbol} direction={signal.get('direction')} "
+        f"score={signal.get('score')} grade={signal.get('grade')} "
+        f"actionable={bool(signal.get('actionable'))} "
+        f"blockers={signal.get('blockers') or []}",
+        flush=True,
+    )
 
     # Telegram is alert-only. It runs only after technical + option filters
     # have produced a final actionable A+/STRONG signal.
@@ -1404,8 +1492,8 @@ async def _evaluate_signal(symbol):
 
     if (
         previous is None
-        or previous.get("grade") != grade
-        or previous.get("direction") != direction
+        or previous.get("grade") != signal.get("grade")
+        or previous.get("direction") != signal.get("direction")
     ):
         signal_history.appendleft(signal)
         await broadcast({
@@ -2454,9 +2542,11 @@ async def _render_keepalive_loop():
 
             if not settings.KINGBRO_KEEPALIVE_ENABLED:
                 continue
-            # Only consume keepalive traffic after a successful morning login
-            # and only during Indian market hours. Browser can stay closed.
-            if not status.get("broker_connected") or not _market_hours_active():
+            # Keep the Render process awake during Indian market hours even if
+            # a platform restart has cleared the in-memory Kotak login. This
+            # cannot recreate 2FA, but it prevents a restarted service from
+            # immediately becoming idle again while the user needs to relogin.
+            if not _market_hours_active():
                 continue
 
             url = _keepalive_url()
@@ -2925,7 +3015,9 @@ async def health():
             "market_hours_active": _market_hours_active(),
             "feed_task_running": bool(feed_task and not feed_task.done()),
             "keepalive_url_detected": bool(_keepalive_url()),
+            "last_tick_age_seconds": _seconds_since_iso(status.get("last_tick_at")),
         },
+        "signal_diagnostics": signal_diagnostics,
         "telegram": {
             **telegram_state,
             "bot_token_configured": bool(TELEGRAM_BOT_TOKEN),
@@ -4125,6 +4217,7 @@ async def connect_kotak(
         )
 
         runtime_state["auth_relogin_required"] = False
+        runtime_state["restart_login_required"] = False
         runtime_state["broker_authenticated_at"] = datetime.now(timezone.utc).isoformat()
         runtime_state["feed_connected_at"] = None
         scanner_state["index_scan_enabled"] = True

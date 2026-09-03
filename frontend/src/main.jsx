@@ -1452,7 +1452,7 @@ function App() {
           <div className="feed-card glass-card mobile-compact-card">
             <div className="box-title">LIVE FEED</div>
             <div className="feed-value">{status.feed_connected?"CONNECTED":"OFFLINE"}</div>
-            <small>{status.last_tick_at ? new Date(status.last_tick_at).toLocaleTimeString("en-IN") : "Waiting for tick"}</small>
+            <small>{status.feed_connected ? (status.last_tick_at ? new Date(status.last_tick_at).toLocaleTimeString("en-IN") : "Waiting for first tick") : (status.last_error || "TOTP login required")}</small>
             {showLogin && (
               <form className="otp-inline" onSubmit={connectBroker}>
                 <input value={totp} maxLength={6} inputMode="numeric" placeholder="TOTP"
