@@ -1371,7 +1371,7 @@ function App() {
     }catch(e){setMessage(`Square Off All failed: ${e?.message||e}`)}
   }
 
-  const showLogin=!status.feed_connected||!!loginError;
+  const showLogin=!status.broker_connected||!!loginError;
   const niftySignal = signals["NIFTY 50"];
   const niftyDisplaySnapshot =
     niftySignal ||

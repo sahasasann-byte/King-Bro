@@ -5,7 +5,8 @@ import os
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, time as dt_time
+from zoneinfo import ZoneInfo
 from typing import Optional, Any
 from collections import deque
 
@@ -29,7 +30,7 @@ from config import settings
 
 app = FastAPI(
     title="King Bro Terminal API",
-    version="7.2.0",
+    version="7.4.0",
 )
 
 
@@ -113,7 +114,35 @@ status = {
 neo_client: Optional[NeoAPI] = None
 feed_task: Optional[asyncio.Task] = None
 stock_feed_task: Optional[asyncio.Task] = None
+runtime_supervisor_task: Optional[asyncio.Task] = None
+render_keepalive_task: Optional[asyncio.Task] = None
+background_tasks: set[asyncio.Task] = set()
 
+IST = ZoneInfo("Asia/Kolkata")
+
+runtime_state = {
+    "supervisor_running": False,
+    "keepalive_running": False,
+    "keepalive_enabled": bool(settings.KINGBRO_KEEPALIVE_ENABLED),
+    "keepalive_url_detected": False,
+    "last_keepalive_at": None,
+    "last_keepalive_error": None,
+    "feed_restart_count": 0,
+    "last_feed_restart_at": None,
+    "last_feed_restart_reason": None,
+    "last_feed_stale_age_seconds": None,
+    "auth_relogin_required": False,
+    "broker_authenticated_at": None,
+    "feed_connected_at": None,
+}
+
+
+def _spawn_background(coro):
+    """Run non-critical I/O without blocking Kotak market tick consumption."""
+    task = asyncio.create_task(coro)
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
+    return task
 
 
 # =========================================================
@@ -603,6 +632,18 @@ def _restore_candle_state_sync():
 @app.on_event("startup")
 async def restore_candle_state_on_startup():
     await asyncio.to_thread(_restore_candle_state_sync)
+    _start_runtime_supervisors()
+
+
+@app.on_event("shutdown")
+async def stop_runtime_supervisors_on_shutdown():
+    global runtime_supervisor_task, render_keepalive_task
+    for task in (runtime_supervisor_task, render_keepalive_task):
+        if task and not task.done():
+            task.cancel()
+    for task in list(background_tasks):
+        if not task.done():
+            task.cancel()
 
 def _ema(values, period):
     if len(values) < period:
@@ -1205,9 +1246,12 @@ async def _attach_auto_option_to_signal(signal):
         return signal
 
     try:
-        discovery = await auto_discover_option(
-            signal["symbol"],
-            signal["direction"],
+        discovery = await asyncio.wait_for(
+            auto_discover_option(
+                signal["symbol"],
+                signal["direction"],
+            ),
+            timeout=max(5, int(settings.KINGBRO_OPTION_CONFIRM_TIMEOUT_SECONDS)),
         )
 
         signal["option_discovery"] = discovery
@@ -1348,7 +1392,7 @@ async def _evaluate_signal(symbol):
 
     # Telegram is alert-only. It runs only after technical + option filters
     # have produced a final actionable A+/STRONG signal.
-    await _maybe_send_telegram_signal(signal)
+    _spawn_background(_maybe_send_telegram_signal(dict(signal)))
 
     previous = signals.get(symbol)
     signals[symbol] = signal
@@ -2268,6 +2312,181 @@ async def inspect_option_contract(
 
 
 # =========================================================
+# RENDER / FEED RELIABILITY — V7.4
+# =========================================================
+# Reliability only. Signal scoring, thresholds, option filters and Telegram
+# eligibility are intentionally unchanged.
+
+
+def _market_hours_active(now_ist: Optional[datetime] = None) -> bool:
+    now_ist = now_ist or datetime.now(IST)
+    if now_ist.weekday() >= 5:
+        return False
+    # Include pre-open/login buffer and a short post-close grace period.
+    current = now_ist.time().replace(tzinfo=None)
+    return dt_time(9, 0) <= current <= dt_time(15, 40)
+
+
+def _seconds_since_iso(value: Optional[str]) -> Optional[float]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds())
+    except Exception:
+        return None
+
+
+def _looks_like_auth_expired(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    markers = (
+        "401",
+        "403",
+        "unauthorized",
+        "invalid token",
+        "token expired",
+        "session expired",
+        "authentication failed",
+        "not authenticated",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _keepalive_url() -> str:
+    base = (
+        settings.KINGBRO_KEEPALIVE_URL
+        or settings.RENDER_EXTERNAL_URL
+        or os.getenv("RENDER_EXTERNAL_URL", "")
+    ).strip()
+    if not base:
+        return ""
+    return base.rstrip("/") + "/health"
+
+
+def _keepalive_get_sync(url: str):
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={
+            "User-Agent": "KING-BRO-Render-MarketHours-Keepalive/7.4",
+            "Cache-Control": "no-cache",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=10) as response:
+        return int(getattr(response, "status", 200))
+
+
+async def _restart_index_feed(reason: str):
+    global feed_task
+
+    if neo_client is None or not status.get("broker_connected"):
+        return False
+
+    now = datetime.now(timezone.utc)
+    last_restart = _seconds_since_iso(runtime_state.get("last_feed_restart_at"))
+    cooldown = max(15, int(settings.KINGBRO_FEED_RESTART_COOLDOWN_SECONDS))
+    if last_restart is not None and last_restart < cooldown:
+        return False
+
+    old_task = feed_task
+    if old_task and not old_task.done():
+        old_task.cancel()
+        try:
+            await old_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    await set_status(feed_connected=False, last_error=f"Feed restarting: {reason}")
+    runtime_state["feed_restart_count"] += 1
+    runtime_state["last_feed_restart_at"] = now.isoformat()
+    runtime_state["last_feed_restart_reason"] = reason
+    print(f"[FEED_RESTART] reason={reason}", flush=True)
+    feed_task = asyncio.create_task(feed_loop())
+    return True
+
+
+async def _runtime_supervisor_loop():
+    runtime_state["supervisor_running"] = True
+    try:
+        while True:
+            await asyncio.sleep(15)
+
+            if neo_client is None or not status.get("broker_connected"):
+                continue
+            if not _market_hours_active():
+                continue
+
+            age = _seconds_since_iso(status.get("last_tick_at"))
+            runtime_state["last_feed_stale_age_seconds"] = None if age is None else round(age, 1)
+
+            stale_after = max(45, int(settings.KINGBRO_FEED_STALE_SECONDS))
+            # feed_loop already handles explicit disconnects. The supervisor
+            # intervenes only when a websocket claims to be connected but no
+            # ticks arrive (silent/stale connection).
+            if status.get("feed_connected"):
+                if age is not None and age > stale_after:
+                    await _restart_index_feed(f"no index tick for {int(age)}s")
+                elif age is None:
+                    connected_age = _seconds_since_iso(runtime_state.get("feed_connected_at"))
+                    if connected_age is not None and connected_age > stale_after:
+                        await _restart_index_feed(f"connected but no first tick for {int(connected_age)}s")
+
+            # If the feed task ended unexpectedly while the authenticated
+            # broker session is still available, bring it back automatically.
+            if feed_task is None or feed_task.done():
+                await _restart_index_feed("feed task not running")
+    except asyncio.CancelledError:
+        return
+    finally:
+        runtime_state["supervisor_running"] = False
+
+
+async def _render_keepalive_loop():
+    runtime_state["keepalive_running"] = True
+    try:
+        while True:
+            interval = max(180, int(settings.KINGBRO_KEEPALIVE_INTERVAL_SECONDS))
+            await asyncio.sleep(interval)
+
+            if not settings.KINGBRO_KEEPALIVE_ENABLED:
+                continue
+            # Only consume keepalive traffic after a successful morning login
+            # and only during Indian market hours. Browser can stay closed.
+            if not status.get("broker_connected") or not _market_hours_active():
+                continue
+
+            url = _keepalive_url()
+            runtime_state["keepalive_url_detected"] = bool(url)
+            if not url:
+                runtime_state["last_keepalive_error"] = "RENDER_EXTERNAL_URL unavailable"
+                continue
+
+            try:
+                code = await asyncio.to_thread(_keepalive_get_sync, url)
+                runtime_state["last_keepalive_at"] = datetime.now(timezone.utc).isoformat()
+                runtime_state["last_keepalive_error"] = None if code < 400 else f"HTTP {code}"
+            except Exception as exc:
+                runtime_state["last_keepalive_error"] = f"{type(exc).__name__}: {exc}"
+                print(f"[KEEPALIVE_FAILED] {type(exc).__name__}: {exc}", flush=True)
+    except asyncio.CancelledError:
+        return
+    finally:
+        runtime_state["keepalive_running"] = False
+
+
+def _start_runtime_supervisors():
+    global runtime_supervisor_task, render_keepalive_task
+    if runtime_supervisor_task is None or runtime_supervisor_task.done():
+        runtime_supervisor_task = asyncio.create_task(_runtime_supervisor_loop())
+    if render_keepalive_task is None or render_keepalive_task.done():
+        render_keepalive_task = asyncio.create_task(_render_keepalive_loop())
+
+
+# =========================================================
 # AUTHENTICATION
 # =========================================================
 
@@ -2401,10 +2620,12 @@ async def feed_loop():
                 ])
 
 
+                runtime_state["feed_connected_at"] = datetime.now(timezone.utc).isoformat()
                 await set_status(
                     feed_connected=True,
                     last_error=None,
                 )
+                backoff = 2
 
 
                 # -----------------------------------------
@@ -2579,7 +2800,15 @@ async def feed_loop():
                         )
 
 
-            backoff = 2
+            # A clean websocket close is still a disconnect. Keep the
+            # authenticated broker session and reconnect automatically.
+            runtime_state["feed_connected_at"] = None
+            await set_status(
+                feed_connected=False,
+                last_error="Kotak index websocket closed; reconnecting.",
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
 
 
         except asyncio.CancelledError:
@@ -2587,25 +2816,28 @@ async def feed_loop():
 
 
         except Exception as exc:
+            runtime_state["feed_connected_at"] = None
+            auth_expired = _looks_like_auth_expired(exc)
+
+            if auth_expired:
+                # Only a real broker-auth failure should force a new TOTP.
+                runtime_state["auth_relogin_required"] = True
+                neo_client = None
+                await set_status(
+                    broker_connected=False,
+                    feed_connected=False,
+                    last_error=f"KOTAK RELOGIN REQUIRED: {type(exc).__name__}: {exc}",
+                )
+                print(f"[KOTAK_AUTH_EXPIRED] {type(exc).__name__}: {exc}", flush=True)
+                return
 
             await set_status(
                 feed_connected=False,
-
-                last_error=
-                    f"{type(exc).__name__}: "
-                    f"{exc}",
+                last_error=f"{type(exc).__name__}: {exc}; reconnecting.",
             )
 
-
-            await asyncio.sleep(
-                backoff
-            )
-
-
-            backoff = min(
-                backoff * 2,
-                30,
-            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
 
 
 # =========================================================
@@ -2688,6 +2920,17 @@ async def health():
         },
         "execution": execution_state,
         "persistence": persistence_status,
+        "runtime": {
+            **runtime_state,
+            "market_hours_active": _market_hours_active(),
+            "feed_task_running": bool(feed_task and not feed_task.done()),
+            "keepalive_url_detected": bool(_keepalive_url()),
+        },
+        "telegram": {
+            **telegram_state,
+            "bot_token_configured": bool(TELEGRAM_BOT_TOKEN),
+            "chat_id_configured": bool(TELEGRAM_CHAT_ID),
+        },
     }
 
 
@@ -3881,10 +4124,15 @@ async def connect_kotak(
             authenticated_client
         )
 
+        runtime_state["auth_relogin_required"] = False
+        runtime_state["broker_authenticated_at"] = datetime.now(timezone.utc).isoformat()
+        runtime_state["feed_connected_at"] = None
+        scanner_state["index_scan_enabled"] = True
 
         await set_status(
             broker_connected=True,
             feed_connected=False,
+            last_tick_at=None,
             last_error=None,
         )
 
