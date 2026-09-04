@@ -286,50 +286,70 @@ function ScannerControl({ scanners, busy, action, engineAction }) {
 }
 
 function SentimentGauge({ signals }) {
-  const valid = Object.values(signals || {}).filter((s) => {
-    const grade = String(s?.grade || "").toUpperCase();
-    const score = Number(s?.score || 0);
-    return (
-      score > 0 &&
-      grade !== "WARMING_UP" &&
-      grade !== "NO_TRADE" &&
-      (s?.direction === "CALL" || s?.direction === "PUT")
-    );
-  });
+  const rows = ["NIFTY 50", "SENSEX"].map((symbol) => {
+    const s = signals?.[symbol];
+    if (!s) return null;
 
-  if (!valid.length) {
+    const tech = s?.technical_scores || {};
+    let bull = Number(tech?.bullish);
+    let bear = Number(tech?.bearish);
+
+    // Backward-compatible fallback for one deploy cycle while old signal
+    // payloads may still be cached in the browser.
+    if (!Number.isFinite(bull) || !Number.isFinite(bear)) {
+      const score = Number(s?.score || 0);
+      bull = s?.direction === "CALL" ? score : 0;
+      bear = s?.direction === "PUT" ? score : 0;
+    }
+
+    if (!Number.isFinite(bull) || !Number.isFinite(bear)) return null;
+    const net = Math.max(-100, Math.min(100, bull - bear));
+    return { symbol, bull, bear, net, direction:s?.direction, score:Number(s?.score || 0) };
+  }).filter(Boolean);
+
+  if (!rows.length) {
     return (
       <div className="sentiment glass-card mobile-compact-card">
         <div className="box-title">MARKET SENTIMENT</div>
-        <div className="gauge">
-          <div className="gauge-inner">
-            <span>WAIT</span>
-            <b>—</b>
-            <small>/100</small>
-          </div>
+        <div className="gauge" style={{"--sentiment":"50%", "--sentiment-color":"#31d9ff"}}>
+          <div className="gauge-inner"><span>WARMING UP</span><b>50</b><small>/100</small></div>
         </div>
+        <div className="sentiment-source">Waiting for technical snapshot</div>
       </div>
     );
   }
 
-  const signed = valid.reduce((sum, s) => {
-    const score = Math.max(0, Math.min(100, Number(s.score || 0)));
-    return sum + (s.direction === "CALL" ? score : -score);
-  }, 0) / valid.length;
+  const avgNet = rows.reduce((sum, r) => sum + r.net, 0) / rows.length;
+  const bias = Math.max(0, Math.min(100, Math.round(50 + avgNet / 2)));
 
-  const bias = Math.max(0, Math.min(100, Math.round(50 + signed / 2)));
-  const label = bias >= 58 ? "BULLISH" : bias <= 42 ? "BEARISH" : "NEUTRAL";
+  let label = "NEUTRAL";
+  let tone = "#31d9ff";
+  if (bias >= 70) { label = "STRONG BULLISH"; tone = "#26f59a"; }
+  else if (bias >= 58) { label = "BULLISH"; tone = "#26f59a"; }
+  else if (bias <= 30) { label = "STRONG BEARISH"; tone = "#ff6078"; }
+  else if (bias <= 42) { label = "BEARISH"; tone = "#ff6078"; }
 
   return (
     <div className="sentiment glass-card mobile-compact-card">
       <div className="box-title">MARKET SENTIMENT</div>
-      <div className="gauge">
+      <div className="gauge" style={{"--sentiment":`${bias}%`, "--sentiment-color":tone}}>
         <div className="gauge-inner">
-          <span>{label}</span>
+          <span style={{color:tone}}>{label}</span>
           <b>{bias}</b>
           <small>/100</small>
         </div>
       </div>
+      <div className="sentiment-mini">
+        {rows.map((r) => (
+          <span key={r.symbol}>
+            <b>{r.symbol === "NIFTY 50" ? "NIFTY" : "SENSEX"}</b>
+            <em className={r.net > 8 ? "pos" : r.net < -8 ? "neg" : ""}>
+              {r.net > 8 ? "BULL" : r.net < -8 ? "BEAR" : "NEUTRAL"} {Math.round(50 + r.net/2)}
+            </em>
+          </span>
+        ))}
+      </div>
+      <div className="sentiment-source">TECHNICAL BIAS • option filter does not alter this reading</div>
     </div>
   );
 }
@@ -342,16 +362,25 @@ function KeyLevels({ snapshot }) {
       ? (indicators?.daily_levels || {})
       : (indicators?.five_minute_levels || {});
 
+  const dailyReady = Boolean(indicators?.daily_levels?.ready);
+  const fiveReady = Boolean(indicators?.five_minute_levels?.ready);
   const fib = levels?.fib || {};
   const ready = Boolean(levels?.ready);
+
+  React.useEffect(() => {
+    if (mode === "daily" && !dailyReady && fiveReady) setMode("five");
+    if (mode === "five" && !fiveReady && dailyReady) setMode("daily");
+  }, [mode, dailyReady, fiveReady]);
+
+  if (!dailyReady && !fiveReady) return null;
 
   return (
     <div className="key-levels glass-card">
       <div className="box-title">KEY LEVELS</div>
 
       <div className="tabs-lite">
-        <button type="button" className={mode==="daily" ? "active" : ""} onClick={()=>setMode("daily")}>Daily</button>
-        <button type="button" className={mode==="five" ? "active" : ""} onClick={()=>setMode("five")}>5 Min</button>
+        <button type="button" disabled={!dailyReady} className={mode==="daily" ? "active" : ""} onClick={()=>setMode("daily")}>Daily</button>
+        <button type="button" disabled={!fiveReady} className={mode==="five" ? "active" : ""} onClick={()=>setMode("five")}>5 Min</button>
       </div>
 
       <div className="levels-list">
@@ -432,7 +461,8 @@ function ScalpingSignal({
       direction: signal.direction,
       grade: signal.grade,
       score: signal.score,
-      actionable: Boolean(
+      actionable: Boolean(signal.actionable),
+      orderReady: Boolean(
         signal.actionable &&
         signal.option_contract
       ),
@@ -445,6 +475,7 @@ function ScalpingSignal({
       target_1: signal.target_1,
       target_2: signal.target_2,
       reasons: signal.reasons || [],
+      blockers: signal.blockers || [],
       ...signalAgeState(signal, nowMs),
       approxRisk: approxRisk(signal),
     });
@@ -469,6 +500,7 @@ function ScalpingSignal({
       grade: signal.grade,
       score: signal.score,
       actionable: Boolean(signal.actionable),
+      orderReady: Boolean(signal.actionable),
       optionName: "",
       entry: signal.entry,
       stop_loss: signal.stop_loss,
@@ -606,6 +638,13 @@ function ScalpingSignal({
             </small>
           </div>
 
+          {top.blockers?.length > 0 && (
+            <div className="signal-blocker">
+              <b>{Number(top.score || 0) >= 70 ? "TECHNICAL SETUP READY" : "WAITING"}</b>
+              <span>{top.blockers[0]}</span>
+            </div>
+          )}
+
           <div className="confirm-box">
             <div className="confirm-title">
               CONFIRMATION
@@ -630,7 +669,7 @@ function ScalpingSignal({
 
           <button
             className="strong-action"
-            disabled={!top.actionable || top.stale}
+            disabled={!top.orderReady || top.stale}
             onClick={() =>
               onOrder({
                 kind: top.kind,
@@ -640,9 +679,11 @@ function ScalpingSignal({
           >
             {top.stale
               ? "STALE SIGNAL"
-              : top.actionable
+              : top.orderReady
                 ? "MANUAL ORDER"
-                : "WAITING"}
+                : top.actionable
+                  ? "SIGNAL • OPTION DATA PENDING"
+                  : "WAITING"}
             <ChevronRight size={18}/>
           </button>
         </>
@@ -696,7 +737,7 @@ function ScalpingSignal({
 
               <button
                 type="button"
-                disabled={!item.actionable || item.stale}
+                disabled={!item.orderReady || item.stale}
                 onClick={() =>
                   onOrder({
                     kind: item.kind,
@@ -720,42 +761,43 @@ function IndicatorStrip({ snapshot }) {
   const fifteen = snapshot?.indicators?.fifteen_minute || {};
   const blocks = [
     ["1M INDICATORS", [
-      ["RSI (14)", one.rsi14],
-      ["Williams %R", one.williams_r14],
-      ["EMA 9", one.ema9],
-      ["EMA 21", one.ema21],
+      ["RSI (14)", one.rsi14], ["Williams %R", one.williams_r14],
+      ["EMA 9", one.ema9], ["EMA 21", one.ema21],
     ]],
-    ["5M MOVING AVG", [
-      ["EMA 9", five.ema9],
-      ["EMA 21", five.ema21],
-      ["MA 20", five.ma20],
-      ["RSI", five.rsi14],
+    ["5M TREND", [
+      ["EMA 9", five.ema9], ["EMA 21", five.ema21],
+      ["MA 20", five.ma20], ["RSI", five.rsi14], ["Action", five.price_action],
     ]],
     ["15M TREND", [
-      ["EMA 9", fifteen.ema9],
-      ["EMA 21", fifteen.ema21],
-      ["RSI", fifteen.rsi14],
-      ["Breakout", fifteen.breakout],
+      ["EMA 9", fifteen.ema9], ["EMA 21", fifteen.ema21],
+      ["RSI", fifteen.rsi14], ["Action", fifteen.price_action], ["Breakout", fifteen.breakout],
     ]],
     ["PRICE ACTION", [
-      ["1M", one.price_action],
-      ["5M", five.price_action],
-      ["15M", fifteen.price_action],
-      ["ATR", one.atr14],
+      ["1M", one.price_action], ["5M", five.price_action],
+      ["15M", fifteen.price_action], ["ATR", one.atr14],
     ]],
-  ];
+  ].map(([title, rows]) => [title, rows.filter(([,v]) => v !== null && v !== undefined && v !== "" && v !== "UNKNOWN")])
+   .filter(([,rows]) => rows.length > 0);
+
+  if (!blocks.length) return null;
+
   return (
-    <div className="indicator-strip">
+    <div className="indicator-strip compact-readings">
       {blocks.map(([title, rows]) => (
         <div className="indicator-card glass-card" key={title}>
           <div className="box-title">{title}</div>
-          {rows.map(([k,v]) => (
-            <div className="indicator-row" key={k}>
-              <span>{k}</span>
-              <b>{typeof v === "number" ? n(v) : (v ?? "—")}</b>
-              <i className={String(v).includes("BEAR") ? "red-dot":"green-dot"} />
-            </div>
-          ))}
+          {rows.map(([k,v]) => {
+            const text = typeof v === "number" ? n(v) : String(v ?? "—");
+            const bearish = /BEAR|DOWN|SELL/i.test(text);
+            const bullish = /BULL|UP|BUY|BREAKOUT/i.test(text);
+            return (
+              <div className="indicator-row" key={k}>
+                <span>{k}</span>
+                <b className={bearish ? "neg" : bullish ? "pos" : ""}>{text}</b>
+                <i className={bearish ? "red-dot" : "green-dot"} />
+              </div>
+            );
+          })}
         </div>
       ))}
     </div>
@@ -1378,6 +1420,10 @@ function App() {
     (signalDetails["NIFTY 50"]?.indicators
       ? { indicators: signalDetails["NIFTY 50"].indicators }
       : null);
+  const hasKeyLevels = Boolean(
+    niftyDisplaySnapshot?.indicators?.daily_levels?.ready ||
+    niftyDisplaySnapshot?.indicators?.five_minute_levels?.ready
+  );
 
   const combinedHistory = React.useMemo(() => {
     const rows = [
@@ -1437,14 +1483,6 @@ function App() {
 
       <main className="main-stage">
         <section className="top-grid scroll-target" ref={sectionRefs.dashboard}>
-          <div className="market-overview glass-card">
-            <div className="box-title">MARKET OVERVIEW</div>
-            <div className="market-pair">
-              <MarketMini item={feed["NIFTY 50"]}/>
-              <MarketMini item={feed["SENSEX"]}/>
-            </div>
-          </div>
-
           <div ref={sectionRefs.index} className="scroll-target"><ScannerControl scanners={scanners} busy={scannerBusy} action={scannerAction} engineAction={engineAction}/></div>
 
           <SentimentGauge signals={signals}/>
@@ -1473,7 +1511,7 @@ function App() {
           </div>
         </section>
 
-        <section className="middle-grid chart-free scroll-target" ref={sectionRefs.signals}>
+        <section className={`middle-grid chart-free scroll-target ${hasKeyLevels ? "" : "no-levels"}`} ref={sectionRefs.signals}>
           <div className="signal-workspace glass-card mobile-priority">
             <div className="workspace-head">
               <div>
@@ -1559,19 +1597,15 @@ function App() {
         <IndicatorStrip snapshot={niftyDisplaySnapshot}/>
 
         <section className="bottom-grid scroll-target">
-          <div ref={sectionRefs.stocks} className="scroll-target"><div className="bottom-card glass-card scanner-summary">
-            <div className="box-title">STOCK SCANNER</div>
-            <div className="scanner-summary-main">
-              <b>
-                {scanners?.stocks?.running
-                  ? `${scanners?.stocks?.resolved || 0}/40 LIVE`
-                  : "STOPPED"}
-              </b>
-              <span>
-                Results are ranked in SCALPING SIGNALS
-              </span>
-            </div>
-          </div></div>
+          {(scanners?.stocks?.running || scanners?.stocks?.enabled || scanners?.stocks?.last_error) && (
+            <div ref={sectionRefs.stocks} className="scroll-target"><div className="bottom-card glass-card scanner-summary">
+              <div className="box-title">STOCK SCANNER</div>
+              <div className="scanner-summary-main">
+                <b>{scanners?.stocks?.running ? `${scanners?.stocks?.resolved || 0}/40 LIVE` : "STARTING"}</b>
+                <span>Results are ranked in SCALPING SIGNALS</span>
+              </div>
+            </div></div>
+          )}
           <RecentSignals history={combinedHistory}/>
           <div ref={sectionRefs.positions} className="scroll-target"><Positions positions={positions} loading={positionsLoading} refresh={loadPositions}
             squareOff={squareOff} squareOffAll={squareOffAll}/></div>

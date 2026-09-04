@@ -31,7 +31,7 @@ from config import settings
 
 app = FastAPI(
     title="King Bro Terminal API",
-    version="7.5.0",
+    version="7.7.0",
 )
 
 
@@ -364,6 +364,14 @@ def _telegram_message(signal: dict[str, Any]) -> str:
         lines.extend(["", "Confirmations:"])
         lines.extend(f"• {x}" for x in reasons[:8])
 
+    warnings = signal.get("warnings") or []
+    if warnings:
+        lines.extend(["", "Option data note:"])
+        lines.extend(f"• {x}" for x in warnings[:2])
+
+    if signal.get("engine") == "classic_breakout_v1":
+        lines.append("Engine: Classic 5M Trend-Aligned Breakout • Min R:R 1:1.85")
+
     lines.extend([
         "",
         "⚠️ MANUAL ORDER ONLY — no automatic execution.",
@@ -421,9 +429,8 @@ async def _send_runtime_telegram_notice(message: str):
 async def _maybe_send_telegram_signal(signal: dict[str, Any]):
     """Deliver an already-qualified signal to Telegram.
 
-    IMPORTANT: this function deliberately does not change the trading strategy.
-    Eligibility remains exactly the same: final actionable A+/STRONG only.
-    The changes here are delivery reliability + diagnostics only.
+    V7.7 alerts confirmed classic breakouts. Grades A+/STRONG/BREAKOUT are eligible;
+    option enrichment is informative and is not a hard veto.
     """
     symbol = str(signal.get("symbol") or "-")
     grade = signal.get("grade")
@@ -434,7 +441,7 @@ async def _maybe_send_telegram_signal(signal: dict[str, Any]):
     if not signal.get("actionable"):
         telegram_state["last_skip_reason"] = f"{symbol}:not_actionable:{grade}"
         return False
-    if grade not in {"A+", "STRONG"}:
+    if grade not in {"A+", "STRONG", "BREAKOUT"}:
         telegram_state["last_skip_reason"] = f"{symbol}:grade_not_alertable:{grade}"
         return False
 
@@ -671,7 +678,7 @@ async def restore_candle_state_on_startup():
 
     # A new Python process cannot retain the authenticated NeoAPI object.
     # Make this explicit instead of silently looking like a random logout.
-    if _market_hours_active():
+    if _keepalive_window_active():
         runtime_state["restart_login_required"] = True
         await set_status(
             broker_connected=False,
@@ -1207,6 +1214,111 @@ def _direction_score(snapshot, direction):
 
 
 
+
+def _classic_breakout_signal(symbol: str, rows: list[dict[str, Any]], lookback: int = 20, min_rr: float = 1.85):
+    """KING BRO classic trend-aligned breakout engine.
+
+    This restores the earlier BaselineSignalEngine behavior for NIFTY/SENSEX:
+    - completed 5-minute candles only
+    - 20-candle resistance/support lookback
+    - fast 5-close mean versus slow 20-close mean
+    - close must break the prior 20-bar extreme in the trend direction
+    - ATR-like risk from recent candle ranges
+    - minimum target R:R 1:1.85 and T2 at 2.30R
+
+    There is deliberately no separate min-score veto. A confirmed breakout is
+    the signal, exactly as in the classic engine; the 60-95 score ranks its
+    strength for display/Telegram.
+    """
+    if len(rows) < lookback + 2:
+        return {
+            "status": "REJECTED",
+            "reason": "INSUFFICIENT_HISTORY",
+            "need": lookback + 2,
+            "have": len(rows),
+        }
+
+    recent = rows[-(lookback + 1):]
+    prev = recent[:-1]
+    last = recent[-1]
+
+    closes = [float(x["close"]) for x in prev]
+    highs = [float(x["high"]) for x in prev]
+    lows = [float(x["low"]) for x in prev]
+    entry = float(last["close"])
+
+    if entry <= 0:
+        return {"status": "REJECTED", "reason": "INVALID_PRICE"}
+
+    fast = sum(closes[-5:]) / 5
+    slow = sum(closes) / len(closes)
+    resistance = max(highs)
+    support = min(lows)
+    ranges = [max(0.0, h - l) for h, l in zip(highs, lows)]
+    atr_like = (sum(ranges[-14:]) / len(ranges[-14:])) if ranges else 0.0
+
+    if atr_like <= 0:
+        return {"status": "REJECTED", "reason": "NO_VOLATILITY"}
+
+    if entry > resistance and fast > slow:
+        side = "BUY"
+        direction = "CALL"
+        stop = max(float(last["low"]), entry - 1.25 * atr_like)
+        risk = entry - stop
+        target1 = entry + min_rr * risk
+        target2 = entry + 2.30 * risk
+        broken_level = resistance
+    elif entry < support and fast < slow:
+        side = "SELL"
+        direction = "PUT"
+        stop = min(float(last["high"]), entry + 1.25 * atr_like)
+        risk = stop - entry
+        target1 = entry - min_rr * risk
+        target2 = entry - 2.30 * risk
+        broken_level = support
+    else:
+        return {
+            "status": "REJECTED",
+            "reason": "NO_CONFIRMED_BREAKOUT",
+            "fast": round(fast, 4),
+            "slow": round(slow, 4),
+            "resistance": round(resistance, 4),
+            "support": round(support, 4),
+            "entry": round(entry, 4),
+        }
+
+    if risk <= 0 or risk / entry > 0.08:
+        return {"status": "REJECTED", "reason": "RISK_OUT_OF_RANGE"}
+
+    trend_strength = min(20, int(abs(fast - slow) / entry * 10000))
+    breakout_strength = min(20, int(abs(entry - broken_level) / atr_like * 10))
+    score = min(95, 60 + trend_strength + breakout_strength)
+
+    return {
+        "status": "SIGNAL",
+        "signal": {
+            "symbol": symbol,
+            "side": side,
+            "direction": direction,
+            "entry": round(entry, 4),
+            "stop_loss": round(stop, 4),
+            "target_1": round(target1, 4),
+            "target_2": round(target2, 4),
+            "rr": min_rr,
+            "score": score,
+            "reason": "trend-aligned breakout",
+            "trend_strength": trend_strength,
+            "breakout_strength": breakout_strength,
+            "fast_mean_5": round(fast, 4),
+            "slow_mean_20": round(slow, 4),
+            "resistance": round(resistance, 4),
+            "support": round(support, 4),
+            "atr_like": round(atr_like, 4),
+            "timeframe_sec": 300,
+            "source": "classic_breakout_v1",
+        },
+    }
+
 def _classify_option_oi(display_symbol, ltp, oi):
     if not display_symbol or ltp is None or oi is None:
         return {
@@ -1273,8 +1385,8 @@ def _option_trade_plan(option_ltp, option_data):
     entry = tick(option_ltp)
     stop = tick(option_ltp * 0.85)
     risk = max(entry - stop, 0.05)
-    t1 = tick(entry + risk)
-    t2 = tick(entry + (risk * 2))
+    t1 = tick(entry + (risk * 1.85))
+    t2 = tick(entry + (risk * 2.30))
 
     return {
         "entry": entry,
@@ -1282,19 +1394,26 @@ def _option_trade_plan(option_ltp, option_data):
         "target_1": t1,
         "target_2": t2,
         "risk_per_unit": tick(risk),
-        "rr_target_1": "1:1",
-        "rr_target_2": "1:2",
-        "basis": "selected option LTP; 15% signal-only risk model",
+        "rr_target_1": "1:1.85",
+        "rr_target_2": "1:2.30",
+        "basis": "selected option LTP; 15% signal-only risk model; classic breakout R:R",
     }
 
 
 async def _attach_auto_option_to_signal(signal):
-    """
-    For a technically actionable CALL/PUT signal, automatically discover
-    the nearest-expiry ATM option and attach live Kotak option intelligence.
+    """Attach the nearest-expiry ATM option as enrichment, never as a veto.
+
+    V7.7 restores the classic breakout engine as the primary decision maker.
+    Kotak option LTP/OI/liquidity remains valuable for contract selection and
+    display, but an incomplete option quote must not kill a confirmed index
+    breakout. This directly avoids the earlier score-85 -> OPTION_NOT_READY
+    missed-alert path.
     """
     if not signal.get("actionable"):
         return signal
+
+    signal.setdefault("warnings", [])
+    signal["option_status"] = "PENDING"
 
     try:
         discovery = await asyncio.wait_for(
@@ -1308,11 +1427,30 @@ async def _attach_auto_option_to_signal(signal):
         signal["option_discovery"] = discovery
 
         if not discovery.get("ready"):
-            signal["actionable"] = False
-            signal["grade"] = "OPTION_NOT_READY"
-            signal["blockers"] = list(signal.get("blockers", [])) + [
-                discovery.get("reason", "Option discovery not ready.")
-            ]
+            # Keep the classic technical signal alive. When Kotak search found
+            # a nearest-expiry candidate but quotes lacked LTP, still expose
+            # the contract identity so the alert/UI is useful.
+            checked = discovery.get("candidates_checked") or []
+            if checked:
+                candidate = checked[0]
+                q = candidate.get("quote") or {}
+                signal["option_contract"] = {
+                    "instrument_token": candidate.get("instrument_token"),
+                    "exchange_segment": discovery.get("exchange_segment"),
+                    "display_symbol": candidate.get("trading_symbol"),
+                    "expiry": candidate.get("expiry"),
+                    "strike_price": candidate.get("strike_price"),
+                    "option_type": candidate.get("option_type"),
+                }
+                if q:
+                    signal["option_intelligence"] = q
+                    signal["option_ltp"] = q.get("ltp")
+                    signal["option_quality_score"] = q.get("liquidity_score") or 0
+
+            reason = discovery.get("reason", "Option discovery not ready.")
+            signal["warnings"].append(reason)
+            signal["option_status"] = "QUOTE_NOT_READY"
+            signal["option_quality_pass"] = False
             return signal
 
         selected = discovery["selected"]
@@ -1346,12 +1484,13 @@ async def _attach_auto_option_to_signal(signal):
         )
 
         if not signal["option_quality_pass"]:
-            signal["actionable"] = False
-            signal["grade"] = "OPTION_FILTER"
-            signal["blockers"] = list(signal.get("blockers", [])) + [
-                "Selected option failed LTP/OI/liquidity confirmation."
-            ]
-            return signal
+            signal["warnings"].append(
+                "Option quote is usable, but OI/liquidity confirmation is below the old V7 filter. "
+                "Classic breakout signal remains active."
+            )
+            signal["option_status"] = "QUALITY_WARNING"
+        else:
+            signal["option_status"] = "READY"
 
         plan = _option_trade_plan(option_ltp, quote)
         if plan:
@@ -1360,74 +1499,90 @@ async def _attach_auto_option_to_signal(signal):
         return signal
 
     except Exception as exc:
-        signal["actionable"] = False
-        signal["grade"] = "OPTION_ERROR"
-        signal["blockers"] = list(signal.get("blockers", [])) + [
-            f"Auto option confirmation failed: {type(exc).__name__}: {exc}"
-        ]
+        signal["warnings"].append(
+            f"Option enrichment failed: {type(exc).__name__}: {exc}"
+        )
+        signal["option_status"] = "ERROR"
+        signal["option_quality_pass"] = False
         return signal
 
 
 async def _evaluate_signal(symbol):
     snap = _indicator_snapshot(symbol)
 
-    bull_score, bull_reasons, bull_blockers = _direction_score(
-        snap, "BULLISH"
-    )
-    bear_score, bear_reasons, bear_blockers = _direction_score(
-        snap, "BEARISH"
-    )
+    # Keep the richer multi-timeframe score only for sentiment/context.
+    # It no longer vetoes the classic 5-minute breakout engine.
+    bull_score, bull_reasons, bull_blockers = _direction_score(snap, "BULLISH")
+    bear_score, bear_reasons, bear_blockers = _direction_score(snap, "BEARISH")
 
-    if bull_score >= bear_score:
-        direction = "CALL"
-        score = bull_score
-        reasons = bull_reasons
-        blockers = bull_blockers
-    else:
-        direction = "PUT"
-        score = bear_score
-        reasons = bear_reasons
-        blockers = bear_blockers
+    classic = _classic_breakout_signal(symbol, list(candles_5m[symbol]))
+    classic_signal = classic.get("signal") if classic.get("status") == "SIGNAL" else None
 
-    if blockers:
-        grade = "WARMING_UP"
-        actionable = False
-    elif score >= 80:
-        grade = "A+"
+    if classic_signal:
+        direction = classic_signal["direction"]
+        score = int(classic_signal["score"])
+        # The old BaselineSignalEngine had no min_score attribute/veto.
+        # Therefore every confirmed trend-aligned breakout remains actionable.
+        grade = "A+" if score >= 80 else ("STRONG" if score >= 70 else "BREAKOUT")
         actionable = True
-    elif score >= 70:
-        grade = "STRONG"
-        actionable = True
-    elif score >= 60:
-        grade = "WATCH"
-        actionable = False
+        blockers = []
+        reasons = [
+            "5M trend-aligned breakout",
+            f"Fast-5 {'>' if classic_signal['side'] == 'BUY' else '<'} Slow-20",
+            f"Breakout strength {classic_signal['breakout_strength']}/20",
+            f"Trend strength {classic_signal['trend_strength']}/20",
+            "Minimum R:R 1:1.85",
+        ]
     else:
-        grade = "NO_TRADE"
+        # No classic breakout right now. Directional scores are still shown so
+        # sentiment/technical cards remain informative without fabricating a call.
+        if bull_score >= bear_score:
+            direction = "CALL"
+            score = bull_score
+            reasons = bull_reasons
+        else:
+            direction = "PUT"
+            score = bear_score
+            reasons = bear_reasons
+
+        if classic.get("reason") == "INSUFFICIENT_HISTORY":
+            grade = "WARMING_UP"
+            blockers = [f"5m classic warm-up {classic.get('have', 0)}/{classic.get('need', 22)}"]
+        else:
+            grade = "NO_TRADE"
+            blockers = []
         actionable = False
 
     signal = {
         "symbol": symbol,
         "direction": direction,
         "score": score,
+        "technical_scores": {
+            "bullish": bull_score,
+            "bearish": bear_score,
+        },
+        "technical_bias": max(0, min(100, round(50 + (bull_score - bear_score) / 2))),
         "grade": grade,
         "actionable": actionable,
         "underlying_ltp": latest.get(symbol, {}).get("ltp"),
         "reasons": reasons,
         "blockers": blockers,
+        "warnings": [],
         "indicators": snap,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "mode": "SIGNAL_ONLY",
+        "mode": "CLASSIC_BREAKOUT_SIGNAL_ONLY",
+        "engine": "classic_breakout_v1",
+        "classic_engine": classic,
         "readiness": {
-            "minimum_ready": not bool(blockers),
+            "minimum_ready": classic.get("reason") != "INSUFFICIENT_HISTORY",
+            "classic_5m_count": len(candles_5m[symbol]),
+            "classic_5m_need": 22,
             "one_minute_count": snap["one_minute"]["count"],
             "five_minute_count": snap["five_minute"]["count"],
             "fifteen_minute_count": snap["fifteen_minute"]["count"],
             "daily_levels_ready": bool((snap.get("daily_levels") or {}).get("ready")),
             "five_minute_levels_ready": bool((snap.get("five_minute_levels") or {}).get("ready")),
-            "note": (
-                "Daily R/S levels require real previous-session candles. "
-                "5M levels use the last completed real 5M candle."
-            ),
+            "note": "Primary signal engine: classic 5M trend-aligned 20-bar breakout, min R:R 1:1.85.",
         },
         "option_contract": None,
         "option_ltp": None,
@@ -1437,12 +1592,16 @@ async def _evaluate_signal(symbol):
         "target_2": None,
     }
 
-    # V6: Technical signal first; real option confirmation only when
-    # the technical setup is actionable. This keeps REST load controlled.
+    if classic_signal:
+        signal["underlying_entry"] = classic_signal["entry"]
+        signal["underlying_stop_loss"] = classic_signal["stop_loss"]
+        signal["underlying_target_1"] = classic_signal["target_1"]
+        signal["underlying_target_2"] = classic_signal["target_2"]
+        signal["rr"] = classic_signal["rr"]
+
     technical_actionable = bool(actionable)
     signal = await _attach_auto_option_to_signal(signal)
 
-    # Reliability diagnostics only — no scoring/filter changes.
     signal_diagnostics["evaluations"] += 1
     signal_diagnostics["last_evaluation_at"] = datetime.now(timezone.utc).isoformat()
     if technical_actionable:
@@ -1450,10 +1609,6 @@ async def _evaluate_signal(symbol):
     final_grade = str(signal.get("grade") or "")
     if signal.get("actionable"):
         signal_diagnostics["final_actionable"] += 1
-    elif final_grade == "OPTION_FILTER":
-        signal_diagnostics["option_filtered"] += 1
-    elif final_grade == "OPTION_ERROR":
-        signal_diagnostics["option_errors"] += 1
     elif final_grade == "WARMING_UP":
         signal_diagnostics["warming_up"] += 1
     elif final_grade == "WATCH":
@@ -1463,23 +1618,28 @@ async def _evaluate_signal(symbol):
 
     signal_diagnostics["last_by_symbol"][symbol] = {
         "at": signal.get("generated_at"),
+        "engine": signal.get("engine"),
         "direction": signal.get("direction"),
         "score": signal.get("score"),
+        "technical_scores": signal.get("technical_scores"),
+        "technical_bias": signal.get("technical_bias"),
         "grade": signal.get("grade"),
         "actionable": bool(signal.get("actionable")),
         "blockers": list(signal.get("blockers") or []),
+        "warnings": list(signal.get("warnings") or []),
+        "option_status": signal.get("option_status"),
         "option_quality_score": signal.get("option_quality_score"),
     }
     print(
-        f"[SIGNAL_EVAL] {symbol} direction={signal.get('direction')} "
+        f"[CLASSIC_SIGNAL_EVAL] {symbol} direction={signal.get('direction')} "
         f"score={signal.get('score')} grade={signal.get('grade')} "
         f"actionable={bool(signal.get('actionable'))} "
-        f"blockers={signal.get('blockers') or []}",
+        f"classic={classic.get('status')} reason={classic.get('reason')} "
+        f"option_status={signal.get('option_status')} "
+        f"warnings={signal.get('warnings') or []}",
         flush=True,
     )
 
-    # Telegram is alert-only. It runs only after technical + option filters
-    # have produced a final actionable A+/STRONG signal.
     _spawn_background(_maybe_send_telegram_signal(dict(signal)))
 
     previous = signals.get(symbol)
@@ -1906,20 +2066,20 @@ def _analyse_option_quote(row: dict[str, Any]):
             ),
         },
         "source": "Kotak Neo Quotes",
+        "quote_types": list(row.get("_kingbro_quote_types") or []),
+        "quote_notes": list(row.get("_kingbro_quote_notes") or []),
         "mock_data": False,
         "received_at":
             datetime.now(timezone.utc).isoformat(),
     }
 
 
-def _quotes_sync(
+def _quote_once_sync(
     instrument_token: str,
     exchange_segment: str,
+    quote_type: str,
 ):
-    # IMPORTANT:
-    # Quotes is a post-login API in the Kotak SDK. A fresh NeoAPI()
-    # object does not carry the session/baseUrl returned by MPIN validate.
-    # Reuse the authenticated global client created by /api/kotak/connect.
+    """Fetch one Kotak quote type and return (row, raw_response)."""
     global neo_client
 
     if neo_client is None:
@@ -1930,37 +2090,181 @@ def _quotes_sync(
     response = neo_client.quotes(
         instrument_tokens=[
             {
-                "instrument_token":
-                    str(instrument_token),
-                "exchange_segment":
-                    str(exchange_segment),
+                "instrument_token": str(instrument_token),
+                "exchange_segment": str(exchange_segment),
             }
         ],
-        quote_type="all",
+        quote_type=quote_type,
     )
 
     rows = _normalise_rows(response)
+    if rows and isinstance(rows[0], dict):
+        return rows[0], response
+    return None, response
 
-    if not rows:
-        if isinstance(response, dict):
-            message = (
-                response.get("message")
-                or response.get("emsg")
-                or response.get("error")
-                or response.get("status")
-            )
-            raise RuntimeError(
-                "Kotak Quotes returned no instrument data"
-                + (f": {message}" if message else "")
-                + f". Raw response keys={list(response.keys())}"
-            )
 
+def _merge_quote_row(base: dict[str, Any], extra: Optional[dict[str, Any]]):
+    """
+    Merge quote-type fallbacks into the `all` quote without inventing values.
+    Non-empty fallback fields fill missing/empty fields; nested depth is merged.
+    """
+    merged = dict(base or {})
+    if not isinstance(extra, dict):
+        return merged
+
+    for key, value in extra.items():
+        if value in (None, "", [], {}):
+            continue
+
+        if key == "depth" and isinstance(value, dict):
+            depth = dict(merged.get("depth") or {})
+            for side, rows in value.items():
+                if rows not in (None, "", [], {}):
+                    depth[side] = rows
+            merged["depth"] = depth
+            continue
+
+        current = merged.get(key)
+        if current in (None, "", [], {}) or key in {
+            "ltp", "last_traded_price", "lp",
+            "open_int", "oi", "open_interest",
+        }:
+            merged[key] = value
+
+    return merged
+
+
+def _row_has_usable_ltp(row: dict[str, Any]) -> bool:
+    return bool(
+        number(row.get("ltp"))
+        or number(row.get("last_traded_price"))
+        or number(row.get("lp"))
+    )
+
+
+def _row_has_usable_oi(row: dict[str, Any]) -> bool:
+    oi = (
+        number(row.get("open_int"))
+        or number(row.get("oi"))
+        or number(row.get("open_interest"))
+    )
+    return oi is not None and oi > 0
+
+
+def _row_has_two_sided_depth(row: dict[str, Any]) -> bool:
+    depth = row.get("depth") or {}
+    return bool(depth.get("buy")) and bool(depth.get("sell"))
+
+
+def _quotes_sync(
+    instrument_token: str,
+    exchange_segment: str,
+):
+    """
+    V7.6 quote reliability:
+    - Prefer Kotak `all` exactly as before.
+    - If `all` is HTTP-successful but omits a usable option LTP, retry `ltp`.
+    - If derivative OI is absent, retry `oi`.
+    - If depth is absent, retry documented `market_depth` and finally the
+      legacy SDK spelling `depth` when supported.
+
+    The existing LTP/OI/liquidity >= 60 signal filter is NOT changed. This
+    only prevents a technically strong setup from being discarded because a
+    single `all` payload was incomplete.
+    """
+    global neo_client
+
+    if neo_client is None:
         raise RuntimeError(
-            f"Kotak Quotes returned no instrument data. "
-            f"Raw response type={type(response).__name__}"
+            "Kotak is not authenticated. Connect with TOTP first."
         )
 
-    return rows[0]
+    merged: dict[str, Any] = {}
+    raw_messages = []
+    used_types = []
+
+    # Primary complete quote.
+    try:
+        row, response = _quote_once_sync(
+            instrument_token,
+            exchange_segment,
+            "all",
+        )
+        if row:
+            merged = _merge_quote_row(merged, row)
+            used_types.append("all")
+        else:
+            raw_messages.append(f"all:{safe_api_message(response)}")
+    except Exception as exc:
+        raw_messages.append(f"all:{type(exc).__name__}:{exc}")
+
+    # Exact LTP fallback -- the critical missed-signal case seen in V7.5.
+    if not _row_has_usable_ltp(merged):
+        try:
+            row, response = _quote_once_sync(
+                instrument_token,
+                exchange_segment,
+                "ltp",
+            )
+            if row:
+                merged = _merge_quote_row(merged, row)
+                used_types.append("ltp")
+            else:
+                raw_messages.append(f"ltp:{safe_api_message(response)}")
+        except Exception as exc:
+            raw_messages.append(f"ltp:{type(exc).__name__}:{exc}")
+
+    # Preserve the existing OI confirmation rule by fetching OI separately
+    # only when the complete quote did not contain it.
+    if str(exchange_segment).lower().endswith("_fo") and not _row_has_usable_oi(merged):
+        try:
+            row, response = _quote_once_sync(
+                instrument_token,
+                exchange_segment,
+                "oi",
+            )
+            if row:
+                merged = _merge_quote_row(merged, row)
+                used_types.append("oi")
+            else:
+                raw_messages.append(f"oi:{safe_api_message(response)}")
+        except Exception as exc:
+            raw_messages.append(f"oi:{type(exc).__name__}:{exc}")
+
+    # Depth is part of the existing liquidity score. Fetch it only if needed.
+    if not _row_has_two_sided_depth(merged):
+        for quote_type in ("market_depth", "depth"):
+            try:
+                row, response = _quote_once_sync(
+                    instrument_token,
+                    exchange_segment,
+                    quote_type,
+                )
+                if row:
+                    merged = _merge_quote_row(merged, row)
+                    used_types.append(quote_type)
+                else:
+                    raw_messages.append(
+                        f"{quote_type}:{safe_api_message(response)}"
+                    )
+                if _row_has_two_sided_depth(merged):
+                    break
+            except Exception as exc:
+                raw_messages.append(
+                    f"{quote_type}:{type(exc).__name__}:{exc}"
+                )
+
+    if not merged:
+        detail = "; ".join(raw_messages[-4:]) or "no instrument data"
+        raise RuntimeError(
+            "Kotak Quotes returned no instrument data after fallbacks: "
+            + detail
+        )
+
+    merged["_kingbro_quote_types"] = used_types
+    if raw_messages:
+        merged["_kingbro_quote_notes"] = raw_messages[-6:]
+    return merged
 
 
 def _search_option_sync(
@@ -2347,7 +2651,7 @@ async def auto_discover_option(symbol: str, direction: str):
             "candidates_checked": inspected,
             "reason": (
                 "Exact-underlying nearest-expiry candidates were found, "
-                "but Kotak Quotes returned no usable live option LTP."
+                "but Kotak Quotes (including LTP fallback) returned no usable live option LTP."
             ),
         }
 
@@ -2373,7 +2677,7 @@ async def auto_discover_option(symbol: str, direction: str):
         "candidates_checked": inspected,
         "source": "Kotak Neo Scrip Search + Quotes",
         "mock_data": False,
-        "selector_version": "5.3",
+        "selector_version": "5.4",
     }
 
 
@@ -2402,15 +2706,24 @@ async def inspect_option_contract(
 # =========================================================
 # RENDER / FEED RELIABILITY — V7.4
 # =========================================================
-# Reliability only. Signal scoring, thresholds, option filters and Telegram
-# eligibility are intentionally unchanged.
+# Reliability supervisor retained. V7.7 restores the classic breakout
+# signal engine; this section remains infrastructure-only.
 
 
-def _market_hours_active(now_ist: Optional[datetime] = None) -> bool:
+def _market_session_active(now_ist: Optional[datetime] = None) -> bool:
+    """True only while NSE/BSE normal cash/index market ticks are expected."""
     now_ist = now_ist or datetime.now(IST)
     if now_ist.weekday() >= 5:
         return False
-    # Include pre-open/login buffer and a short post-close grace period.
+    current = now_ist.time().replace(tzinfo=None)
+    return dt_time(9, 15) <= current <= dt_time(15, 30)
+
+
+def _keepalive_window_active(now_ist: Optional[datetime] = None) -> bool:
+    """Render wake/login buffer; deliberately wider than the feed watchdog."""
+    now_ist = now_ist or datetime.now(IST)
+    if now_ist.weekday() >= 5:
+        return False
     current = now_ist.time().replace(tzinfo=None)
     return dt_time(9, 0) <= current <= dt_time(15, 40)
 
@@ -2505,7 +2818,7 @@ async def _runtime_supervisor_loop():
 
             if neo_client is None or not status.get("broker_connected"):
                 continue
-            if not _market_hours_active():
+            if not _market_session_active():
                 continue
 
             age = _seconds_since_iso(status.get("last_tick_at"))
@@ -2546,7 +2859,7 @@ async def _render_keepalive_loop():
             # a platform restart has cleared the in-memory Kotak login. This
             # cannot recreate 2FA, but it prevents a restarted service from
             # immediately becoming idle again while the user needs to relogin.
-            if not _market_hours_active():
+            if not _keepalive_window_active():
                 continue
 
             url = _keepalive_url()
@@ -3012,7 +3325,9 @@ async def health():
         "persistence": persistence_status,
         "runtime": {
             **runtime_state,
-            "market_hours_active": _market_hours_active(),
+            "market_hours_active": _market_session_active(),
+            "market_session_active": _market_session_active(),
+            "keepalive_window_active": _keepalive_window_active(),
             "feed_task_running": bool(feed_task and not feed_task.done()),
             "keepalive_url_detected": bool(_keepalive_url()),
             "last_tick_age_seconds": _seconds_since_iso(status.get("last_tick_at")),

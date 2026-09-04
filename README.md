@@ -69,3 +69,15 @@ Operational expectation:
 2. Confirm `/health` shows `broker_connected: true`, `feed_connected: true`, `runtime.supervisor_running: true` and `runtime.keepalive_url_detected: true`.
 3. Dashboard/browser may then be closed; actionable A+/STRONG signals continue to use the same Telegram rules.
 4. A broker session that genuinely expires still requires a fresh TOTP; the patch does not bypass Kotak authentication.
+
+## V7.6 final reliability + compact UI patch
+- Strategy thresholds/weights and Telegram eligibility remain unchanged.
+- Strong technical option setups no longer depend on one `quote_type=all` payload: missing LTP/OI/depth are fetched using targeted Kotak quote fallbacks before the existing quality filter is evaluated.
+- Feed-stale watchdog is limited to 09:15–15:30 IST; Render keepalive remains 09:00–15:40 IST.
+- Market Sentiment now shows a live combined NIFTY + SENSEX technical bias even during NO_TRADE periods.
+- Blank/duplicate UI areas are removed or hidden until real readings exist.
+- Stock Scan START/STOP controls remain available.
+
+
+## V7.7 — Classic breakout engine restored
+NIFTY 50 and SENSEX primary calls now use the earlier 5-minute, 20-bar trend-aligned breakout engine with minimum R:R 1:1.85. A confirmed classic breakout is no longer cancelled merely because Kotak option enrichment is incomplete. Option selection/LTP/OI/liquidity remains attached as enrichment when available. Telegram alerts accept A+, STRONG and classic BREAKOUT grades, with the existing cooldown/retry protections. See `PATCH_NOTES_V7.7.md`.
