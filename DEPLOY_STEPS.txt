@@ -1,0 +1,20 @@
+KING BRO V6 - SAME OLD RENDER SERVICE
+
+1. Render -> king-bro -> Settings -> Auto-Deploy OFF.
+2. Download this ZIP and extract it.
+3. In GitHub King-Bro repo, replace the old project files with the files from this ZIP.
+4. Render -> Environment: keep existing Kotak + Telegram values.
+5. Add GITHUB_TOKEN and STATE_GIST_ID for a PRIVATE Gist.
+6. STATE_GIST_FILENAME=kingbro_original_state.json
+7. BOOTSTRAP_URL must be BLANK when using the same service URL.
+8. Render -> Manual Deploy -> Deploy latest commit.
+9. After deploy, Telegram -> /start
+10. Telegram -> /status
+11. Morning before market -> /login CURRENT_TOTP
+12. Telegram -> /status and confirm Broker CONNECTED + Index feed LIVE.
+13. Index signals are automatic 09:30-15:30 IST.
+14. Stocks stay OFF unless /stockon is sent.
+15. Manual order only. No automatic trade execution.
+
+FIRST EMPTY GIST NOTE:
+If the private Gist has no candles, the original 22x1m / 21x5m / 9x15m engine must build its first live history once. After state is saved, future sessions restore from Gist.

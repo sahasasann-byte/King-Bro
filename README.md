@@ -1,83 +1,78 @@
+# KING BRO Telegram Original V6 — Daily Auto
 
-# King Bro Terminal V4
+Telegram-only, manual-order signal service for the user's original V7.3 multi-timeframe strategy.
 
-Screen shows only the current TOTP. Consumer Key, Mobile Number, UCC and MPIN stay in Render Environment Variables.
+## Daily behaviour
 
-Backend Render:
-- Root Directory: backend
-- Build: pip install -r requirements.txt
-- Start: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+1. Morning: send `/login CURRENT_6_DIGIT_TOTP` once.
+2. Bot validates Kotak login with MPIN from Render env.
+3. NIFTY 50 + SENSEX live feed starts automatically.
+4. Automatic signal generation runs during **09:30–15:30 IST**.
+5. A+/STRONG signals are enriched with the option contract, live option premium, OI/liquidity, Entry, SL, T1 and T2 and sent to Telegram.
+6. Order placement remains **MANUAL ONLY**. This project contains no auto-order execution.
+7. Stock scanner is **OFF by default**. Use `/stockon` and `/stockoff`.
 
-Backend Environment:
-- KOTAK_CONSUMER_KEY
-- KOTAK_MOBILE_NUMBER
-- KOTAK_UCC
-- KOTAK_MPIN
-- KOTAK_ENVIRONMENT=prod
-- FRONTEND_URL=https://YOUR-FRONTEND.onrender.com
-- PYTHON_VERSION=3.12.10
+## Original index strategy lock
 
-Frontend Render Static Site:
-- Root Directory: frontend
-- Build: npm install && npm run build
-- Publish Directory: dist
-- VITE_API_URL=https://YOUR-BACKEND.onrender.com
+Warm-up requirements are unchanged:
+- 1-minute candles: 22
+- 5-minute candles: 21
+- 15-minute candles: 9
 
-No mock data. No order placement.
+Signal score thresholds:
+- A+ >= 80
+- STRONG >= 70
+- WATCH >= 60 (not actionable)
 
-## V7.3 Light-mode patch
-- Trading/signal strategy is unchanged.
-- WebSocket stays the primary live data path.
-- Frontend REST safety refresh reduced from 30s to 60s.
-- Heavy signal-detail refresh reduced to 120s.
-- REST refresh pauses while browser tab is hidden.
-- Positions refresh reduced from 30s to 60s.
-- Telegram env keys added to env.example.
-- Telegram test endpoint: POST /api/telegram/test
-- Telegram status endpoint: GET /api/telegram/status
+Option quality gate is preserved. Premium risk plan is the old 15% SL, T1=1R, T2=2R.
 
-### LIGHT Telegram Check
-Dashboard LIVE FEED card includes a manual **TELEGRAM CHECK** button. It does not poll in the background. A tap first checks `/api/telegram/status`, then sends one test message through `/api/telegram/test`. Strategy/signal logic is unchanged.
+## Important: first deployment / empty Gist
 
+This build restores candle history from a **private GitHub Gist**. Render Free local `/tmp` is not durable.
 
-## V7.4 Render market-hours reliability patch (strategy unchanged)
+If the Gist already contains a prior live session, the restored candles can make the original engine ready from the morning without waiting for 21 new 5-minute candles.
 
-Goal: one morning Kotak TOTP, then keep the NIFTY 50 + SENSEX signal engine and Telegram delivery alive through the Indian market session even when the dashboard/browser is closed.
+If the Gist is empty, the first live session has to build the required candles from the live feed. Once saved, later Render restarts/mornings restore them from Gist.
 
-Reliability changes only:
-- Signal scoring, A+/STRONG thresholds, option LTP/OI/liquidity filter, SL/targets and Telegram alert eligibility are unchanged.
-- Index scanner is automatically ON after a successful morning Kotak login.
-- Kotak websocket reconnects automatically on ordinary disconnects.
-- A market-hours supervisor restarts a silently stale feed (default: no index tick for 90 seconds).
-- A real auth-expiry style error is the only feed error that marks `KOTAK RELOGIN REQUIRED`.
-- Telegram sending runs outside the market-feed read loop so a slow Telegram request cannot block Kotak ticks.
-- Option confirmation has a 30-second I/O timeout so a stuck Kotak quote/search request cannot freeze the feed loop indefinitely. The option filter itself is unchanged.
-- During 09:00–15:40 Asia/Kolkata, after successful broker login, the backend makes a best-effort self keepalive request every 8 minutes using Render's `RENDER_EXTERNAL_URL`. This is intended to prevent inactivity spin-down while the signal engine is needed; browser may stay closed.
-- `/health` now exposes `runtime` and `telegram` diagnostics.
-- Temporary feed disconnect no longer forces the frontend to show the TOTP box; it shows login only when broker authentication is actually not connected.
+Kotak's own public support page currently says historical-data retrieval is not allowed for Neo Trade API, so this build does **not** pretend that a guaranteed Kotak historical backfill is available. It uses real saved live candles instead.
 
-Optional environment overrides (defaults are already in code):
-- `KINGBRO_KEEPALIVE_ENABLED=true`
-- `KINGBRO_KEEPALIVE_INTERVAL_SECONDS=300`
-- `KINGBRO_FEED_STALE_SECONDS=90`
-- `KINGBRO_FEED_RESTART_COOLDOWN_SECONDS=60`
-- `KINGBRO_OPTION_CONFIRM_TIMEOUT_SECONDS=30`
-- `KINGBRO_KEEPALIVE_URL=` (leave blank on Render unless `RENDER_EXTERNAL_URL` is unavailable)
+## Telegram commands
 
-Operational expectation:
-1. Open KING BRO in the morning and submit the current Kotak TOTP once.
-2. Confirm `/health` shows `broker_connected: true`, `feed_connected: true`, `runtime.supervisor_running: true` and `runtime.keepalive_url_detected: true`.
-3. Dashboard/browser may then be closed; actionable A+/STRONG signals continue to use the same Telegram rules.
-4. A broker session that genuinely expires still requires a fresh TOTP; the patch does not bypass Kotak authentication.
+- `/start` or `/help` — menu/help
+- `/status` — broker/feed/readiness status
+- `/login 123456` — morning TOTP login (message deletion attempted immediately)
+- `/loginhelp` — login help
+- `/indexon` / `/indexoff`
+- `/stockon` / `/stockoff`
+- `/save` — save candle state to private Gist
+- `/test` — Telegram service test
 
-## V7.6 final reliability + compact UI patch
-- Strategy thresholds/weights and Telegram eligibility remain unchanged.
-- Strong technical option setups no longer depend on one `quote_type=all` payload: missing LTP/OI/depth are fetched using targeted Kotak quote fallbacks before the existing quality filter is evaluated.
-- Feed-stale watchdog is limited to 09:15–15:30 IST; Render keepalive remains 09:00–15:40 IST.
-- Market Sentiment now shows a live combined NIFTY + SENSEX technical bias even during NO_TRADE periods.
-- Blank/duplicate UI areas are removed or hidden until real readings exist.
-- Stock Scan START/STOP controls remain available.
+## Required Render environment variables
 
+```text
+KOTAK_CONSUMER_KEY=
+KOTAK_MOBILE_NUMBER=
+KOTAK_UCC=
+KOTAK_MPIN=
+KOTAK_ENVIRONMENT=prod
 
-## V7.7 — Classic breakout engine restored
-NIFTY 50 and SENSEX primary calls now use the earlier 5-minute, 20-bar trend-aligned breakout engine with minimum R:R 1:1.85. A confirmed classic breakout is no longer cancelled merely because Kotak option enrichment is incomplete. Option selection/LTP/OI/liquidity remains attached as enrichment when available. Telegram alerts accept A+, STRONG and classic BREAKOUT grades, with the existing cooldown/retry protections. See `PATCH_NOTES_V7.7.md`.
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+TELEGRAM_WEBHOOK_SECRET=use-a-long-random-secret
+PUBLIC_URL=
+
+GITHUB_TOKEN=
+STATE_GIST_ID=
+STATE_GIST_FILENAME=kingbro_original_state.json
+
+# Leave blank when replacing the existing service at the same URL.
+BOOTSTRAP_URL=
+```
+
+Render automatically supplies `RENDER_EXTERNAL_URL`, so `PUBLIC_URL` can normally be blank. If you set it manually, use your exact Render service URL.
+
+## Same old Render service
+
+You can replace the code in the existing `king-bro` GitHub repo and keep the same Render service. Keep Auto-Deploy OFF while changing files; deploy once manually after env values are correct.
+
+Do not set `BOOTSTRAP_URL` to the same service URL you are replacing.
