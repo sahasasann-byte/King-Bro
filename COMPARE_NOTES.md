@@ -11,3 +11,8 @@ Compared with uploaded King-Bro-main(2)(1).zip:
 7. Telegram-only; no dashboard, positions, manual-order endpoints or browser WebSocket.
 8. Old 40-stock scanner retained with /stockon /stockoff and OFF by default.
 9. Signals only 09:30-15:30 IST.
+
+## V6.1 Render build fix
+- Replaced invalid PyPI dependency `neo-api-client` with official active package `kotakneoapi==3.0.6`.
+- Python import namespace remains `neo_api_client`, so `main.py` imports do not change.
+- Python 3.12 is supported by kotakneoapi 3.0.6.

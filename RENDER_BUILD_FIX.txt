@@ -1,0 +1,22 @@
+V6.1 RENDER BUILD FIX
+=====================
+
+Reason old V6 build failed:
+  neo-api-client is not published on PyPI.
+
+Correct official current package:
+  kotakneoapi==3.0.6
+
+The Python import stays:
+  from neo_api_client import NeoAPI
+
+Fast fix in GitHub:
+1. Open requirements.txt
+2. Replace:
+     neo-api-client
+   with:
+     kotakneoapi==3.0.6
+3. Commit changes.
+4. Render -> Manual Deploy -> Deploy latest commit.
+
+Expected build should proceed past the previous dependency error.
