@@ -1,20 +1,59 @@
-KING BRO V6 - SAME OLD RENDER SERVICE
+KING BRO V7 FINAL — SAME RENDER SERVICE DEPLOY
+===============================================
 
-1. Render -> king-bro -> Settings -> Auto-Deploy OFF.
-2. Download this ZIP and extract it.
-3. In GitHub King-Bro repo, replace the old project files with the files from this ZIP.
-4. Render -> Environment: keep existing Kotak + Telegram values.
-5. Add GITHUB_TOKEN and STATE_GIST_ID for a PRIVATE Gist.
-6. STATE_GIST_FILENAME=kingbro_original_state.json
-7. BOOTSTRAP_URL must be BLANK when using the same service URL.
-8. Render -> Manual Deploy -> Deploy latest commit.
-9. After deploy, Telegram -> /start
-10. Telegram -> /status
-11. Morning before market -> /login CURRENT_TOTP
-12. Telegram -> /status and confirm Broker CONNECTED + Index feed LIVE.
-13. Index signals are automatic 09:30-15:30 IST.
-14. Stocks stay OFF unless /stockon is sent.
-15. Manual order only. No automatic trade execution.
+1) BACKUP current GitHub King-Bro repo (Code -> Download ZIP).
 
-FIRST EMPTY GIST NOTE:
-If the private Gist has no candles, the original 22x1m / 21x5m / 9x15m engine must build its first live history once. After state is saved, future sessions restore from Gist.
+2) Upload/replace the contents of this ZIP into the ROOT of the same King-Bro repo.
+   Keep Render Auto-Deploy OFF while uploading.
+
+3) Render Environment — keep your existing Kotak/Telegram values and verify:
+   KOTAK_CONSUMER_KEY
+   KOTAK_MOBILE_NUMBER
+   KOTAK_UCC
+   KOTAK_MPIN
+   KOTAK_ENVIRONMENT=prod
+   TELEGRAM_BOT_TOKEN
+   TELEGRAM_CHAT_ID
+   TELEGRAM_WEBHOOK_SECRET
+   PUBLIC_URL=https://king-bro-4pn0.onrender.com
+   GITHUB_TOKEN              (GitHub Account permission: Gists Read + write)
+   STATE_GIST_ID
+   STATE_GIST_FILENAME=kingbro_original_state.json
+
+   For same-service upgrade, BOOTSTRAP_URL should be blank.
+
+4) GitHub repo -> Settings -> Secrets and variables -> Actions -> New repository secret
+   Name:  SERVICE_URL
+   Value: https://king-bro-4pn0.onrender.com
+
+5) Render Start Command:
+   uvicorn main:app --host 0.0.0.0 --port $PORT
+
+6) Render -> Manual Deploy -> Deploy latest commit. Keep Auto-Deploy OFF afterwards.
+
+7) After deploy, open:
+   https://king-bro-4pn0.onrender.com/health
+   Expected: ok=true, version=7.0.0, persistence.configured=true.
+
+8) Telegram:
+   /start
+   /status
+
+9) Morning around 09:00-09:20 IST:
+   /login CURRENT_6_DIGIT_TOTP
+   Then /status. Verify Broker CONNECTED + Index feed LIVE.
+
+10) Normal uninterrupted day:
+    one morning TOTP -> live feed auto reconnect -> 09:30-15:30 auto signal scan.
+
+IMPORTANT LIMIT:
+If Render destroys/restarts the whole process, the in-memory authenticated Kotak Neo
+client is lost. V7 preserves candles in Gist and immediately sends a RELOGIN REQUIRED
+Telegram alert, but a fresh TOTP is still required after that process restart. The bot
+does not store or bypass TOTP/2FA.
+
+STOCKS:
+Default OFF. /stockon enables the original 40-stock scanner; /stockoff disables it.
+
+MANUAL SIGNALS ONLY:
+No place_order / modify_order / cancel_order / automatic execution is included.

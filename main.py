@@ -1,11 +1,12 @@
 import asyncio
+import inspect
 import json
 import os
 import re
 import urllib.parse
 import urllib.request
 from collections import deque
-from datetime import datetime, timezone, date, time as dt_time
+from datetime import datetime, timezone, date, time as dt_time, timedelta
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -14,11 +15,11 @@ from pydantic import BaseModel, Field
 from neo_api_client import NeoAPI
 from neo_api_client.websocket.feed import WsToken, SFeedIndex, SFeedScrip
 
-APP_VERSION = "6.0.0"
+APP_VERSION = "7.0.0"
 IST = ZoneInfo("Asia/Kolkata")
 
 app = FastAPI(
-    title="KING BRO Telegram Original V6 Daily Auto",
+    title="KING BRO V7 Final Reliable Telegram",
     version=APP_VERSION,
 )
 
@@ -52,6 +53,29 @@ STATE_GIST_FILENAME = os.getenv(
 # One-time migration source. Keep old service alive until /status confirms restore.
 BOOTSTRAP_URL = os.getenv("BOOTSTRAP_URL", "").strip().rstrip("/")
 
+# Reliability controls. Internal keepalive runs ONLY during the market feed window.
+KEEPALIVE_ENABLED = os.getenv("KINGBRO_KEEPALIVE_ENABLED", "true").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+KEEPALIVE_INTERVAL_SECONDS = int(os.getenv("KINGBRO_KEEPALIVE_INTERVAL_SECONDS", "480") or 480)
+KEEPALIVE_URL = (
+    os.getenv("KINGBRO_KEEPALIVE_URL", "").strip().rstrip("/")
+    or (f"{PUBLIC_URL}/health" if PUBLIC_URL else "")
+)
+SUPERVISOR_ENABLED = os.getenv("KINGBRO_SUPERVISOR_ENABLED", "true").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+FEED_STALE_SECONDS = int(os.getenv("KINGBRO_FEED_STALE_SECONDS", "120") or 120)
+AUTO_STATE_SAVE_SECONDS = int(os.getenv("KINGBRO_AUTO_STATE_SAVE_SECONDS", "300") or 300)
+
+# Official kotakneoapi 3.0.6 exposes historical_data(). This is best-effort only:
+# Gist restore remains the primary durable source, and a failed historical call never
+# changes the original V7.3 strategy or blocks the live feed.
+HISTORICAL_BACKFILL_ENABLED = os.getenv("KINGBRO_HISTORICAL_BACKFILL", "true").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+HISTORICAL_LOOKBACK_DAYS = int(os.getenv("KINGBRO_HISTORICAL_LOOKBACK_DAYS", "5") or 5)
+
 # =========================================================
 # MARKET TIME / STRATEGY LOCK
 # =========================================================
@@ -67,8 +91,8 @@ INDEX_NEED_1M = 22
 INDEX_NEED_5M = 21
 INDEX_NEED_15M = 9
 
-MAX_1M = 300
-MAX_5M = 200
+MAX_1M = 900
+MAX_5M = 240
 MAX_15M = 200
 
 # Exact old public signal thresholds.
@@ -164,7 +188,28 @@ runtime = {
     "process_started_at": datetime.now(timezone.utc).isoformat(),
     "state_source": None,
     "last_state_save_at": None,
+    "last_state_save_error": None,
+    "last_state_save_error_at": None,
     "last_state_restore_at": None,
+    "last_keepalive_at": None,
+    "last_keepalive_ok": None,
+    "supervisor_running": False,
+    "feed_restart_count": 0,
+    "last_feed_restart_at": None,
+    "relogin_required": False,
+    "last_relogin_notice_at": None,
+    "historical_backfill_attempted": False,
+    "historical_backfill_loaded": 0,
+    "historical_backfill_error": None,
+    "evaluations": 0,
+    "warming_up": 0,
+    "no_trade": 0,
+    "technical_actionable": 0,
+    "option_filtered": 0,
+    "option_errors": 0,
+    "final_actionable": 0,
+    "last_evaluation_at": None,
+    "last_score_by_symbol": {},
 }
 
 # =========================================================
@@ -555,19 +600,38 @@ async def save_state():
                         timezone.utc
                     ).isoformat()
                 )
+                runtime["last_state_save_error"] = None
+                runtime["last_state_save_error_at"] = None
 
             return ok
 
         except Exception as exc:
-            runtime["last_error"] = (
+            message = (
                 f"State save: "
                 f"{type(exc).__name__}: {exc}"
             )
-            print(
-                f"[STATE_SAVE_FAILED] "
-                f"{runtime['last_error']}",
-                flush=True,
-            )
+            runtime["last_error"] = message
+
+            # Avoid flooding Render logs with the exact same Gist error.
+            now = datetime.now(timezone.utc)
+            previous_error = runtime.get("last_state_save_error")
+            previous_at = runtime.get("last_state_save_error_at")
+            should_log = previous_error != message
+            if not should_log and previous_at:
+                try:
+                    should_log = (
+                        now - datetime.fromisoformat(previous_at)
+                    ).total_seconds() >= 300
+                except Exception:
+                    should_log = True
+
+            runtime["last_state_save_error"] = message
+            runtime["last_state_save_error_at"] = now.isoformat()
+            if should_log:
+                print(
+                    f"[STATE_SAVE_FAILED] {message}",
+                    flush=True,
+                )
             return False
 
 
@@ -2583,11 +2647,17 @@ def option_trade_plan(option_ltp):
                 entry + 2 * risk
             ),
 
+        "risk_per_unit":
+            tick(risk),
+
         "rr_target_1":
             "1:1",
 
         "rr_target_2":
             "1:2",
+
+        "basis":
+            "selected option LTP; 15% signal-only risk model",
     }
 
 
@@ -2616,6 +2686,9 @@ async def evaluate_index_signal(symbol):
         not signal_window_open()
     ):
         return
+
+    runtime["evaluations"] += 1
+    runtime["last_evaluation_at"] = datetime.now(timezone.utc).isoformat()
 
     snapshot = indicator_snapshot(
         symbol
@@ -2651,7 +2724,15 @@ async def evaluate_index_signal(symbol):
         score
     )
 
+    runtime["last_score_by_symbol"][symbol] = {
+        "direction": direction,
+        "score": score,
+        "grade": grade,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+
     if blockers:
+        runtime["warming_up"] += 1
         runtime["last_index_blocker"] = (
             f"{symbol}: "
             + ", ".join(blockers)
@@ -2667,6 +2748,7 @@ async def evaluate_index_signal(symbol):
         "A+",
         "STRONG",
     }:
+        runtime["no_trade"] += 1
         print(
             f"[INDEX_NO_TRADE] "
             f"{symbol} {direction} "
@@ -2701,6 +2783,7 @@ async def evaluate_index_signal(symbol):
 
     # ORIGINAL strategy required real option confirmation.
     # Current robust quote fallback is used before applying the same quality gate.
+    runtime["technical_actionable"] += 1
     try:
         discovery = await asyncio.wait_for(
             auto_discover_option(
@@ -2711,6 +2794,7 @@ async def evaluate_index_signal(symbol):
         )
 
     except Exception as exc:
+        runtime["option_errors"] += 1
         runtime["last_index_blocker"] = (
             f"{symbol}: option discovery error: "
             f"{type(exc).__name__}: {exc}"
@@ -2718,6 +2802,7 @@ async def evaluate_index_signal(symbol):
         return
 
     if not discovery.get("ready"):
+        runtime["option_errors"] += 1
         runtime["last_index_blocker"] = (
             f"{symbol}: "
             f"{discovery.get('reason')}"
@@ -2767,6 +2852,7 @@ async def evaluate_index_signal(symbol):
     )
 
     if not quality_pass:
+        runtime["option_filtered"] += 1
         runtime["last_index_blocker"] = (
             f"{symbol}: option filter "
             f"LTP={option_ltp} "
@@ -2838,6 +2924,7 @@ async def evaluate_index_signal(symbol):
     )
 
     if ok:
+        runtime["final_actionable"] += 1
         index_alert_cache[
             signal_key
         ] = now_ts
@@ -3504,6 +3591,361 @@ async def consume_stock_tick(
 
 
 # =========================================================
+# BEST-EFFORT OFFICIAL HISTORICAL BACKFILL
+# =========================================================
+INDEX_HISTORY_SPEC = {
+    "NIFTY 50": {
+        "exchange_segment": "nse_cm",
+        "instrument_token": "Nifty 50",
+    },
+    "SENSEX": {
+        "exchange_segment": "bse_cm",
+        "instrument_token": "SENSEX",
+    },
+}
+
+
+def index_history_ready(symbol):
+    return (
+        len(candles_1m[symbol]) >= INDEX_NEED_1M
+        and len(candles_5m[symbol]) >= INDEX_NEED_5M
+        and len(candles_15m[symbol]) >= INDEX_NEED_15M
+    )
+
+
+def all_index_history_ready():
+    return all(index_history_ready(symbol) for symbol in SIGNAL_SYMBOLS)
+
+
+def _historical_rows(response):
+    """Normalise the common SDK response shapes without inventing candles."""
+    if response is None:
+        return []
+
+    # pandas DataFrame (SDKs sometimes return one)
+    if hasattr(response, "to_dict") and not isinstance(response, dict):
+        try:
+            return response.to_dict("records")
+        except Exception:
+            pass
+
+    if isinstance(response, list):
+        return response
+
+    if not isinstance(response, dict):
+        return []
+
+    for key in ("candles", "records", "items", "values"):
+        value = response.get(key)
+        if isinstance(value, list):
+            return value
+
+    data = response.get("data")
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("candles", "records", "items", "values", "data"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+
+    return []
+
+
+def _historical_timestamp(value):
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        raw = float(value)
+        # milliseconds -> seconds
+        if raw > 10_000_000_000:
+            raw /= 1000.0
+        return int(raw)
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    try:
+        raw = float(text)
+        if raw > 10_000_000_000:
+            raw /= 1000.0
+        return int(raw)
+    except Exception:
+        pass
+
+    text = text.replace("Z", "+00:00")
+    for fmt in (
+        None,
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%d-%b-%Y %H:%M:%S",
+    ):
+        try:
+            if fmt is None:
+                dt = datetime.fromisoformat(text)
+            else:
+                dt = datetime.strptime(text, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=IST)
+            return int(dt.timestamp())
+        except Exception:
+            continue
+
+    return None
+
+
+def _historical_candle(row, minutes):
+    """Convert dict/list historical rows into KING BRO candle format."""
+    ts = opn = high = low = close = None
+
+    if isinstance(row, dict):
+        def pick(*names):
+            for name in names:
+                if row.get(name) not in (None, ""):
+                    return row.get(name)
+            return None
+
+        ts = _historical_timestamp(
+            pick(
+                "ts", "timestamp", "time", "datetime", "date",
+                "exchange_time", "exchange_timestamp", "start_time",
+            )
+        )
+        opn = number(pick("open", "Open", "o"))
+        high = number(pick("high", "High", "h"))
+        low = number(pick("low", "Low", "l"))
+        close = number(pick("close", "Close", "c", "ltp"))
+
+    elif isinstance(row, (list, tuple)) and len(row) >= 5:
+        # Most candle APIs use [timestamp, open, high, low, close, ...].
+        ts = _historical_timestamp(row[0])
+        opn = number(row[1])
+        high = number(row[2])
+        low = number(row[3])
+        close = number(row[4])
+
+    if None in (ts, opn, high, low, close):
+        return None
+
+    if high < low:
+        return None
+
+    bucket = bucket_start(ts, minutes)
+
+    # Do not import the current still-forming candle.
+    current_bucket = bucket_start(int(datetime.now(timezone.utc).timestamp()), minutes)
+    if bucket >= current_bucket:
+        return None
+
+    return {
+        "ts": int(bucket),
+        "open": float(opn),
+        "high": float(high),
+        "low": float(low),
+        "close": float(close),
+        "ticks": 0,
+        "source": "kotak_historical",
+    }
+
+
+def _merge_history(target, rows, minutes):
+    merged = {int(c.get("ts")): dict(c) for c in target if isinstance(c, dict) and c.get("ts") is not None}
+    before = len(merged)
+
+    for row in rows:
+        candle = _historical_candle(row, minutes)
+        if candle is not None:
+            merged[int(candle["ts"])] = candle
+
+    ordered = [merged[key] for key in sorted(merged)]
+    target.clear()
+    for candle in ordered[-target.maxlen:]:
+        target.append(candle)
+
+    return max(0, len(merged) - before)
+
+
+def _historical_call_sync(client, exchange_segment, instrument_token, interval):
+    """
+    Call official kotakneoapi historical_data() using signature introspection.
+    v3.0.6 exposes this method; argument names are mapped conservatively.
+    If an account/API variant rejects the request, caller falls back to Gist/live.
+    """
+    method = getattr(client, "historical_data", None)
+    if not callable(method):
+        raise RuntimeError("Installed Kotak SDK has no historical_data()")
+
+    end_dt = datetime.now(IST)
+    start_dt = end_dt - timedelta(days=max(2, HISTORICAL_LOOKBACK_DAYS))
+    start_date = start_dt.strftime("%Y-%m-%d")
+    end_date = end_dt.strftime("%Y-%m-%d")
+    start_iso = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+    end_iso = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    try:
+        params = inspect.signature(method).parameters
+    except Exception:
+        params = {}
+
+    aliases = {
+        "exchange_segment": exchange_segment,
+        "exchange": exchange_segment,
+        "segment": exchange_segment,
+        "instrument_token": instrument_token,
+        "token": instrument_token,
+        "symbol": instrument_token,
+        "instrument": instrument_token,
+        "interval": interval,
+        "timeframe": interval,
+        "time_frame": interval,
+        "resolution": interval,
+        "from_date": start_date,
+        "fromdate": start_date,
+        "start_date": start_date,
+        "to_date": end_date,
+        "todate": end_date,
+        "end_date": end_date,
+        "start_time": start_iso,
+        "from_time": start_iso,
+        "end_time": end_iso,
+        "to_time": end_iso,
+    }
+
+    kwargs = {}
+    required_missing = []
+    for name, param in params.items():
+        if name == "self":
+            continue
+        if name in aliases:
+            kwargs[name] = aliases[name]
+        elif param.default is inspect._empty and param.kind not in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            required_missing.append(name)
+
+    if params and not required_missing:
+        return method(**kwargs)
+
+    # Conservative fallbacks for SDK naming variants. Only TypeError advances
+    # to the next shape; real API errors are surfaced immediately.
+    attempts = [
+        dict(
+            exchange_segment=exchange_segment,
+            instrument_token=instrument_token,
+            interval=interval,
+            from_date=start_date,
+            to_date=end_date,
+        ),
+        dict(
+            exchange_segment=exchange_segment,
+            instrument_token=instrument_token,
+            interval=interval,
+            start_time=start_iso,
+            end_time=end_iso,
+        ),
+    ]
+
+    last_type_error = None
+    for candidate in attempts:
+        try:
+            return method(**candidate)
+        except TypeError as exc:
+            last_type_error = exc
+            continue
+
+    if last_type_error:
+        raise last_type_error
+    raise RuntimeError("Historical data call could not be constructed")
+
+
+def historical_backfill_sync(client):
+    total = 0
+    errors = []
+
+    interval_variants = {
+        1: ("1minute", "1m", "1min", "1"),
+        5: ("5minute", "5m", "5min", "5"),
+        15: ("15minute", "15m", "15min", "15"),
+    }
+
+    for symbol in SIGNAL_SYMBOLS:
+        spec = INDEX_HISTORY_SPEC[symbol]
+        targets = (
+            (1, candles_1m[symbol], INDEX_NEED_1M),
+            (5, candles_5m[symbol], INDEX_NEED_5M),
+            (15, candles_15m[symbol], INDEX_NEED_15M),
+        )
+
+        for minutes, target, need in targets:
+            # Enough saved candles? Do not make unnecessary REST calls.
+            if len(target) >= need and (minutes != 1 or refresh_daily_levels(symbol).get("ready")):
+                continue
+
+            success = False
+            last_error = None
+            for interval in interval_variants[minutes]:
+                try:
+                    response = _historical_call_sync(
+                        client,
+                        spec["exchange_segment"],
+                        spec["instrument_token"],
+                        interval,
+                    )
+                    rows = _historical_rows(response)
+                    if rows:
+                        total += _merge_history(target, rows, minutes)
+                        success = True
+                        break
+                    last_error = "no candle rows returned"
+                except Exception as exc:
+                    last_error = f"{type(exc).__name__}: {exc}"
+
+            if not success and last_error:
+                errors.append(f"{symbol} {minutes}m: {last_error}")
+
+    runtime["historical_backfill_attempted"] = True
+    runtime["historical_backfill_loaded"] = total
+    runtime["historical_backfill_error"] = "; ".join(errors[:6]) if errors else None
+    return total
+
+
+async def historical_backfill_if_needed(client):
+    if not HISTORICAL_BACKFILL_ENABLED:
+        return 0
+
+    # Gist history is the primary path. Historical REST is only a gap filler.
+    needs_backfill = not all_index_history_ready()
+    if not needs_backfill:
+        needs_backfill = any(not refresh_daily_levels(symbol).get("ready") for symbol in SIGNAL_SYMBOLS)
+
+    if not needs_backfill:
+        runtime["historical_backfill_attempted"] = False
+        runtime["historical_backfill_error"] = None
+        return 0
+
+    try:
+        loaded = await asyncio.to_thread(historical_backfill_sync, client)
+        if loaded:
+            runtime["state_source"] = "gist_plus_kotak_historical"
+            await save_state()
+            print(f"[HISTORICAL_BACKFILL] loaded={loaded}", flush=True)
+        elif runtime.get("historical_backfill_error"):
+            print(
+                f"[HISTORICAL_BACKFILL_SKIPPED] {runtime['historical_backfill_error']}",
+                flush=True,
+            )
+        return loaded
+    except Exception as exc:
+        runtime["historical_backfill_attempted"] = True
+        runtime["historical_backfill_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"[HISTORICAL_BACKFILL_FAILED] {runtime['historical_backfill_error']}", flush=True)
+        return 0
+
+
+# =========================================================
 # AUTH
 # =========================================================
 def authenticate_sync(totp):
@@ -3626,6 +4068,12 @@ async def login_with_totp(totp):
     runtime[
         "last_error"
     ] = None
+    runtime["relogin_required"] = False
+    runtime["last_relogin_notice_at"] = None
+
+    # Fill only missing/stale candle history. Gist remains primary; the
+    # official Kotak historical endpoint is a best-effort gap filler.
+    await historical_backfill_if_needed(client)
 
     if (
         index_feed_task
@@ -3658,6 +4106,39 @@ async def login_with_totp(totp):
         )
 
     return True
+
+
+def looks_like_auth_error(exc):
+    text = str(exc or "").lower()
+    return any(
+        token in text
+        for token in (
+            "401", "403", "unauthor", "forbidden",
+            "invalid session", "session expired", "login required",
+            "invalid token", "auth failed",
+        )
+    )
+
+
+async def send_relogin_notice(reason):
+    now = datetime.now(timezone.utc)
+    previous = runtime.get("last_relogin_notice_at")
+    if previous:
+        try:
+            age = (now - datetime.fromisoformat(previous)).total_seconds()
+            if age < 300:
+                return
+        except Exception:
+            pass
+
+    runtime["last_relogin_notice_at"] = now.isoformat()
+    await telegram_send(
+        "⚠️ KING BRO — KOTAK RELOGIN REQUIRED\n\n"
+        f"Reason: {reason}\n"
+        "Candle history is safe in Gist.\n"
+        "Send /login CURRENT_TOTP once to resume live signals.",
+        with_keyboard=True,
+    )
 
 
 # =========================================================
@@ -3831,6 +4312,13 @@ async def index_feed_loop():
                 f"{runtime['last_error']}",
                 flush=True,
             )
+
+            if looks_like_auth_error(exc):
+                runtime["broker_connected"] = False
+                runtime["relogin_required"] = True
+                neo_client = None
+                await send_relogin_notice(runtime["last_error"])
+                return
 
             await asyncio.sleep(
                 backoff
@@ -4248,6 +4736,13 @@ async def stock_feed_loop():
                 flush=True,
             )
 
+            if looks_like_auth_error(exc):
+                runtime["broker_connected"] = False
+                runtime["relogin_required"] = True
+                neo_client = None
+                await send_relogin_notice(runtime["stock_error"])
+                return
+
             if runtime[
                 "stock_scan_enabled"
             ]:
@@ -4318,8 +4813,9 @@ async def stop_stock_scan():
 # TELEGRAM COMMANDS
 # =========================================================
 def index_readiness_text(symbol):
+    ready = index_history_ready(symbol)
     return (
-        f"{symbol}: "
+        f"{'✅' if ready else '⚠️'} {symbol}: "
         f"1M {len(candles_1m[symbol])}/{INDEX_NEED_1M}, "
         f"5M {len(candles_5m[symbol])}/{INDEX_NEED_5M}, "
         f"15M {len(candles_15m[symbol])}/{INDEX_NEED_15M}"
@@ -4494,36 +4990,46 @@ async def telegram_webhook(
         return {"ok": True}
 
     if text == "/status":
+        tick_age = last_tick_age_seconds()
+        scores = runtime.get("last_score_by_symbol") or {}
         await telegram_send(
-            "👑 KING BRO STATUS\n\n"
+            "👑 KING BRO V7 STATUS\n\n"
             f"Broker: "
             f"{'CONNECTED' if runtime['broker_connected'] else 'OFFLINE'}\n"
             f"Index feed: "
             f"{'LIVE' if runtime['index_feed_connected'] else 'OFFLINE'}\n"
+            f"Re-login required: "
+            f"{'YES ⚠️' if runtime.get('relogin_required') else 'NO'}\n"
+            f"Last tick age: "
+            f"{int(tick_age) if tick_age is not None else 'N/A'} sec\n"
             f"Index signals: "
             f"{'ON' if runtime['index_scan_enabled'] else 'OFF'}\n"
-            f"Signal window now: "
+            f"Signal window: "
             f"{'ACTIVE' if signal_window_open() else 'INACTIVE'}\n\n"
             f"{index_readiness_text('NIFTY 50')}\n"
-            f"{index_readiness_text('SENSEX')}\n\n"
-            f"State source: "
-            f"{runtime.get('state_source')}\n"
-            f"Last state save: "
-            f"{runtime.get('last_state_save_at')}\n"
-            f"Last index signal: "
-            f"{runtime.get('last_index_signal_at')}\n"
-            f"Last index blocker: "
-            f"{runtime.get('last_index_blocker')}\n\n"
-            f"Stock scan: "
-            f"{'ON' if runtime['stock_scan_enabled'] else 'OFF'}\n"
-            f"Stock feed: "
+            f"{index_readiness_text('SENSEX')}\n"
+            f"State source: {runtime.get('state_source')}\n"
+            f"Last save: {runtime.get('last_state_save_at')}\n"
+            f"Gist error: {runtime.get('last_state_save_error')}\n\n"
+            f"Evaluations: {runtime.get('evaluations', 0)}\n"
+            f"Technical actionable: {runtime.get('technical_actionable', 0)}\n"
+            f"Final actionable: {runtime.get('final_actionable', 0)}\n"
+            f"Option filtered/errors: "
+            f"{runtime.get('option_filtered', 0)}/{runtime.get('option_errors', 0)}\n"
+            f"Warming/No-trade: "
+            f"{runtime.get('warming_up', 0)}/{runtime.get('no_trade', 0)}\n"
+            f"Last scores: {scores}\n"
+            f"Last blocker: {runtime.get('last_index_blocker')}\n\n"
+            f"Supervisor: "
+            f"{'ON' if runtime.get('supervisor_running') else 'OFF'}\n"
+            f"Feed restarts: {runtime.get('feed_restart_count', 0)}\n"
+            f"Last feed restart: {runtime.get('last_feed_restart_at')}\n"
+            f"Keepalive: {runtime.get('last_keepalive_ok')}\n\n"
+            f"Stock scan/feed: "
+            f"{'ON' if runtime['stock_scan_enabled'] else 'OFF'}/"
             f"{'LIVE' if runtime['stock_feed_connected'] else 'OFFLINE'}\n"
-            f"Stocks resolved: "
-            f"{runtime['stock_resolved']}/{len(STOCK_UNIVERSE)}\n"
-            f"Last stock signal: "
-            f"{runtime.get('last_stock_signal_at')}\n"
-            f"Last error: "
-            f"{runtime.get('last_error')}",
+            f"Stocks resolved: {runtime['stock_resolved']}/{len(STOCK_UNIVERSE)}\n"
+            f"Last error: {runtime.get('last_error')}",
             with_keyboard=True,
         )
         return {"ok": True}
@@ -4626,7 +5132,7 @@ async def telegram_webhook(
 async def root():
     return {
         "service":
-            "KING BRO Telegram Original V6 Daily Auto",
+            "KING BRO V7 Final All Fixed",
 
         "version":
             APP_VERSION,
@@ -4653,98 +5159,69 @@ async def root():
 
 @app.get("/health")
 async def health():
+    tick_age = last_tick_age_seconds()
     return {
         "ok": True,
         "version": APP_VERSION,
-
-        "broker_connected":
-            runtime[
-                "broker_connected"
-            ],
-
-        "index_feed_connected":
-            runtime[
-                "index_feed_connected"
-            ],
-
-        "index_scan_enabled":
-            runtime[
-                "index_scan_enabled"
-            ],
-
-        "signal_window_active":
-            signal_window_open(),
-
+        "time_ist": ist_now().isoformat(),
+        "broker_connected": runtime["broker_connected"],
+        "relogin_required": runtime.get("relogin_required"),
+        "index_feed_connected": runtime["index_feed_connected"],
+        "last_tick_at": runtime.get("last_tick_at"),
+        "last_tick_age_seconds": tick_age,
+        "index_scan_enabled": runtime["index_scan_enabled"],
+        "feed_window_active": feed_window_open(),
+        "signal_window_active": signal_window_open(),
+        "history_ready": all_index_history_ready(),
         "nifty": {
-            "1m":
-                len(
-                    candles_1m[
-                        "NIFTY 50"
-                    ]
-                ),
-
-            "5m":
-                len(
-                    candles_5m[
-                        "NIFTY 50"
-                    ]
-                ),
-
-            "15m":
-                len(
-                    candles_15m[
-                        "NIFTY 50"
-                    ]
-                ),
+            "1m": len(candles_1m["NIFTY 50"]),
+            "5m": len(candles_5m["NIFTY 50"]),
+            "15m": len(candles_15m["NIFTY 50"]),
+            "ready": index_history_ready("NIFTY 50"),
         },
-
         "sensex": {
-            "1m":
-                len(
-                    candles_1m[
-                        "SENSEX"
-                    ]
-                ),
-
-            "5m":
-                len(
-                    candles_5m[
-                        "SENSEX"
-                    ]
-                ),
-
-            "15m":
-                len(
-                    candles_15m[
-                        "SENSEX"
-                    ]
-                ),
+            "1m": len(candles_1m["SENSEX"]),
+            "5m": len(candles_5m["SENSEX"]),
+            "15m": len(candles_15m["SENSEX"]),
+            "ready": index_history_ready("SENSEX"),
         },
-
-        "stock_scan_enabled":
-            runtime[
-                "stock_scan_enabled"
-            ],
-
-        "stock_feed_connected":
-            runtime[
-                "stock_feed_connected"
-            ],
-
-        "state_source":
-            runtime.get(
-                "state_source"
-            ),
-
-        "last_state_save_at":
-            runtime.get(
-                "last_state_save_at"
-            ),
-
-        "last_error":
-            runtime.get(
-                "last_error"
-            ),
+        "diagnostics": {
+            "evaluations": runtime.get("evaluations", 0),
+            "warming_up": runtime.get("warming_up", 0),
+            "no_trade": runtime.get("no_trade", 0),
+            "technical_actionable": runtime.get("technical_actionable", 0),
+            "option_filtered": runtime.get("option_filtered", 0),
+            "option_errors": runtime.get("option_errors", 0),
+            "final_actionable": runtime.get("final_actionable", 0),
+            "last_evaluation_at": runtime.get("last_evaluation_at"),
+            "last_score_by_symbol": runtime.get("last_score_by_symbol"),
+            "last_index_blocker": runtime.get("last_index_blocker"),
+        },
+        "reliability": {
+            "supervisor_running": runtime.get("supervisor_running"),
+            "feed_restart_count": runtime.get("feed_restart_count", 0),
+            "last_feed_restart_at": runtime.get("last_feed_restart_at"),
+            "last_keepalive_at": runtime.get("last_keepalive_at"),
+            "last_keepalive_ok": runtime.get("last_keepalive_ok"),
+            "keepalive_market_only": True,
+        },
+        "persistence": {
+            "configured": bool(GITHUB_TOKEN and STATE_GIST_ID),
+            "state_source": runtime.get("state_source"),
+            "last_state_save_at": runtime.get("last_state_save_at"),
+            "last_state_save_error": runtime.get("last_state_save_error"),
+            "historical_backfill_attempted": runtime.get("historical_backfill_attempted"),
+            "historical_backfill_loaded": runtime.get("historical_backfill_loaded"),
+            "historical_backfill_error": runtime.get("historical_backfill_error"),
+        },
+        "stocks": {
+            "scan_enabled": runtime["stock_scan_enabled"],
+            "feed_connected": runtime["stock_feed_connected"],
+            "resolved": runtime.get("stock_resolved", 0),
+            "universe": len(STOCK_UNIVERSE),
+        },
+        "execution": "MANUAL_ONLY",
+        "last_error": runtime.get("last_error"),
     }
 
 
@@ -4772,34 +5249,301 @@ async def http_login(
 
 
 # =========================================================
-# STARTUP
+# RELIABILITY: KEEPALIVE + FEED SUPERVISOR + PERIODIC SAVE
+# =========================================================
+keepalive_task: Optional[asyncio.Task] = None
+supervisor_task: Optional[asyncio.Task] = None
+autosave_task: Optional[asyncio.Task] = None
+
+
+def _keepalive_ping_sync(url: str) -> bool:
+    """Best-effort self-ping. Never raises to the event loop."""
+    try:
+        request = urllib.request.Request(
+            url,
+            method="GET",
+            headers={
+                "User-Agent": "kingbro-v7-market-keepalive",
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return 200 <= response.status < 300
+    except Exception as exc:
+        print(
+            f"[KEEPALIVE_FAIL] {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return False
+
+
+def last_tick_age_seconds():
+    value = runtime.get("last_tick_at")
+    if not value:
+        return None
+    try:
+        return max(
+            0.0,
+            (
+                datetime.now(timezone.utc)
+                - datetime.fromisoformat(value)
+            ).total_seconds(),
+        )
+    except Exception:
+        return None
+
+
+async def keepalive_loop():
+    """
+    Self-ping only in the 09:00–15:40 IST feed window.
+    The external GitHub Actions ping in .github/workflows is the primary
+    anti-idle guard because an in-process loop cannot wake a stopped process.
+    """
+    if not KEEPALIVE_URL:
+        print(
+            "[KEEPALIVE] disabled — no PUBLIC_URL / KINGBRO_KEEPALIVE_URL",
+            flush=True,
+        )
+        return
+
+    print(
+        f"[KEEPALIVE] market-only interval={KEEPALIVE_INTERVAL_SECONDS}s "
+        f"url={KEEPALIVE_URL}",
+        flush=True,
+    )
+
+    await asyncio.sleep(15)
+
+    while True:
+        try:
+            if feed_window_open():
+                ok = await asyncio.to_thread(
+                    _keepalive_ping_sync,
+                    KEEPALIVE_URL,
+                )
+                runtime["last_keepalive_at"] = (
+                    datetime.now(timezone.utc).isoformat()
+                )
+                runtime["last_keepalive_ok"] = ok
+                await asyncio.sleep(max(120, KEEPALIVE_INTERVAL_SECONDS))
+            else:
+                # Do not burn Render Free hours overnight/weekends.
+                await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            runtime["last_keepalive_ok"] = False
+            print(
+                f"[KEEPALIVE_ERROR] {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            await asyncio.sleep(60)
+
+
+async def restart_index_feed(reason: str):
+    global index_feed_task
+
+    if neo_client is None or not runtime.get("broker_connected"):
+        return False
+
+    if index_feed_task and not index_feed_task.done():
+        index_feed_task.cancel()
+        try:
+            await index_feed_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    runtime["index_feed_connected"] = False
+    runtime["feed_restart_count"] = int(runtime.get("feed_restart_count") or 0) + 1
+    runtime["last_feed_restart_at"] = datetime.now(timezone.utc).isoformat()
+    print(f"[SUPERVISOR_RESTART_INDEX] {reason}", flush=True)
+
+    index_feed_task = asyncio.create_task(
+        index_feed_loop(),
+        name="kingbro-index-feed",
+    )
+    return True
+
+
+async def restart_stock_feed(reason: str):
+    global stock_feed_task
+
+    if (
+        not runtime.get("stock_scan_enabled")
+        or neo_client is None
+        or not runtime.get("broker_connected")
+    ):
+        return False
+
+    if stock_feed_task and not stock_feed_task.done():
+        stock_feed_task.cancel()
+        try:
+            await stock_feed_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    runtime["stock_feed_connected"] = False
+    print(f"[SUPERVISOR_RESTART_STOCK] {reason}", flush=True)
+    stock_feed_task = asyncio.create_task(
+        stock_feed_loop(),
+        name="kingbro-stock-feed",
+    )
+    return True
+
+
+async def supervisor_loop():
+    """
+    Keeps an authenticated session's WebSocket feeds alive.
+    It can reconnect WebSockets without a new TOTP. It cannot recreate a
+    Kotak authenticated client after the whole Render process is destroyed;
+    in that case it sends a Telegram re-login alert instead of pretending the
+    session was restored.
+    """
+    runtime["supervisor_running"] = True
+    print(
+        f"[SUPERVISOR] started stale_threshold={FEED_STALE_SECONDS}s",
+        flush=True,
+    )
+
+    try:
+        while True:
+            await asyncio.sleep(30)
+
+            if not feed_window_open():
+                continue
+
+            if neo_client is None or not runtime.get("broker_connected"):
+                runtime["relogin_required"] = True
+                await send_relogin_notice(
+                    "Render/Kotak session is not authenticated during market hours."
+                )
+                continue
+
+            # Feed coroutine died unexpectedly: recreate it with the same
+            # authenticated NeoAPI object — no new TOTP required.
+            if index_feed_task is None or index_feed_task.done():
+                await restart_index_feed("index feed task stopped")
+                continue
+
+            # A connected feed that stopped delivering index ticks is stale.
+            tick_age = last_tick_age_seconds()
+            if (
+                runtime.get("index_feed_connected")
+                and tick_age is not None
+                and tick_age > FEED_STALE_SECONDS
+            ):
+                await restart_index_feed(
+                    f"last index tick is {int(tick_age)}s old"
+                )
+
+            if runtime.get("stock_scan_enabled"):
+                if stock_feed_task is None or stock_feed_task.done():
+                    await restart_stock_feed("stock feed task stopped")
+    except asyncio.CancelledError:
+        return
+    finally:
+        runtime["supervisor_running"] = False
+
+
+async def autosave_loop():
+    """Extra safety net; normal 5-minute candle-close saves remain unchanged."""
+    await asyncio.sleep(45)
+    while True:
+        try:
+            if feed_window_open() and (GITHUB_TOKEN and STATE_GIST_ID):
+                await save_state()
+                await asyncio.sleep(max(120, AUTO_STATE_SAVE_SECONDS))
+            else:
+                await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            print(
+                f"[AUTOSAVE_ERROR] {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            await asyncio.sleep(60)
+
+
+# =========================================================
+# STARTUP / SHUTDOWN
 # =========================================================
 @app.on_event("startup")
 async def startup():
-    await restore_state()
+    global keepalive_task, supervisor_task, autosave_task
+
+    loaded = await restore_state()
 
     try:
         await setup_telegram()
     except Exception as exc:
         print(
-            f"[TELEGRAM_SETUP_FAILED] "
-            f"{type(exc).__name__}: {exc}",
+            f"[TELEGRAM_SETUP_FAILED] {type(exc).__name__}: {exc}",
             flush=True,
         )
 
-    if (
-        TELEGRAM_BOT_TOKEN
-        and
-        TELEGRAM_CHAT_ID
-    ):
+    if KEEPALIVE_ENABLED and KEEPALIVE_URL:
+        keepalive_task = asyncio.create_task(
+            keepalive_loop(),
+            name="kingbro-market-keepalive",
+        )
+
+    if SUPERVISOR_ENABLED:
+        supervisor_task = asyncio.create_task(
+            supervisor_loop(),
+            name="kingbro-feed-supervisor",
+        )
+
+    autosave_task = asyncio.create_task(
+        autosave_loop(),
+        name="kingbro-gist-autosave",
+    )
+
+    ready = all_index_history_ready()
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         await telegram_send(
-            "👑 KING BRO Telegram-only backend ready.\n\n"
+            "👑 KING BRO V7 FINAL backend ready.\n\n"
+            f"State restored: {loaded} candles\n"
             f"{index_readiness_text('NIFTY 50')}\n"
-            f"{index_readiness_text('SENSEX')}\n\n"
-            "Send /login CURRENT_TOTP once in the morning.\n"
-            "After login, live feed + automatic signal generation run for the session.\n"
-            "Original V7.3 signal engine is locked.\n"
+            f"{index_readiness_text('SENSEX')}\n"
+            f"History: {'✅ READY' if ready else '⚠️ NEEDS BACKFILL/WARM-UP'}\n\n"
+            "Morning: send /login CURRENT_TOTP once.\n"
             "Signals: 09:30–15:30 IST.\n"
-            "Previous candles restore from private Gist when available.",
+            "Original V7.3 strategy is unchanged.\n"
+            "Stocks remain OFF unless /stockon is pressed.",
             with_keyboard=True,
         )
+
+        # A process restart destroys the authenticated NeoAPI object. Tell the
+        # user immediately during market hours; candle history remains safe.
+        if feed_window_open() and neo_client is None:
+            runtime["relogin_required"] = True
+            await send_relogin_notice(
+                "Backend started/restarted during the market feed window."
+            )
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    global keepalive_task, supervisor_task, autosave_task
+    global index_feed_task, stock_feed_task
+
+    # Best effort only: a hard platform kill may not give shutdown enough time.
+    if GITHUB_TOKEN and STATE_GIST_ID:
+        try:
+            await asyncio.wait_for(save_state(), timeout=8)
+        except Exception as exc:
+            print(
+                f"[SHUTDOWN_SAVE_FAILED] {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
+    for task in (
+        index_feed_task,
+        stock_feed_task,
+        keepalive_task,
+        supervisor_task,
+        autosave_task,
+    ):
+        if task and not task.done():
+            task.cancel()

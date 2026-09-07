@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: king-bro-telegram-original
+    name: king-bro
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt

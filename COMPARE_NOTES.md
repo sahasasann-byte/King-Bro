@@ -1,18 +1,32 @@
-KING BRO TELEGRAM ORIGINAL V5 — comparison/final notes
+# V7 FINAL compare notes
 
-Compared with uploaded King-Bro-main(2)(1).zip:
-1. Uploaded version is V7.7 and currently makes Classic 5M 20-bar breakout the primary trigger.
-2. The earlier successful Telegram screenshots match the older V7.3 multi-timeframe score engine:
-   5M price action, 1M EMA 9/21, 1M breakout, RSI, Williams, CPR/Fib, A+/STRONG thresholds.
-3. Original V7.3 index warm-up was 22x1M + 21x5M + 9x15M.
-4. This V5 preserves those original requirements but removes the morning delay by durable previous-candle restore via private GitHub Gist.
-5. Current robust option quote fallbacks from the uploaded V7.6/V7.7 are retained.
-6. Old option premium risk plan is restored: 15% SL, T1 1R, T2 2R.
-7. Telegram-only; no dashboard, positions, manual-order endpoints or browser WebSocket.
-8. Old 40-stock scanner retained with /stockon /stockoff and OFF by default.
-9. Signals only 09:30-15:30 IST.
+Base reviewed: user-supplied `King-Bro-keepalive.zip` (Grok patch).
 
-## V6.1 Render build fix
-- Replaced invalid PyPI dependency `neo-api-client` with official active package `kotakneoapi==3.0.6`.
-- Python import namespace remains `neo_api_client`, so `main.py` imports do not change.
-- Python 3.12 is supported by kotakneoapi 3.0.6.
+## Kept from the base
+- Telegram webhook + persistent keyboard
+- Original V7.3 index scoring engine
+- Original 40-stock scanner
+- Gist persistence
+- Kotak option contract/premium enrichment
+- Manual-only execution model
+- `kotakneoapi==3.0.6`
+
+## Fixed / added
+1. Replaced 24-hour internal self-ping with market-window-only self-ping.
+2. Added external GitHub Actions `/health` keepalive during 09:00–15:40 IST.
+3. Added feed supervisor for dead/stale WebSocket recovery using the current authenticated session.
+4. Added auth/session-expiry detection and Telegram re-login notice.
+5. Added periodic Gist autosave and best-effort shutdown save.
+6. Added Gist error de-duplication to avoid log flooding.
+7. Expanded index 1m history to 900 candles so previous-session daily levels can survive the next session.
+8. Added best-effort official `historical_data()` gap fill after login when Gist is insufficient.
+9. Added actionable diagnostics to `/status` and `/health`.
+10. Added explicit no-false-promise behavior: after a whole Render process restart, fresh TOTP may be required.
+
+## Strategy deliberately NOT changed
+- index warm-up 22/21/9
+- A+ / STRONG thresholds
+- V7.3 score weights
+- option liquidity gate
+- 15% premium SL, T1=1R, T2=2R
+- stock strategy thresholds/universe

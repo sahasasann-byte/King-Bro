@@ -1,0 +1,30 @@
+KING BRO V7 FINAL — STATIC VERIFICATION REPORT
+===============================================
+Date: 2026-09-07
+
+PASS — Python syntax compile (main.py)
+PASS — Module import with Kotak SDK stubs
+PASS — Original V7.3 INDEX direction-score equivalence: 2,000 randomized snapshots
+PASS — Original V7.3 STOCK direction-score equivalence: 2,000 randomized snapshots
+PASS — Original V7.3 option premium plan equivalence
+PASS — Index warm-up still 22x1m / 21x5m / 9x15m
+PASS — A+ >=80, STRONG >=70, WATCH >=60
+PASS — Option quality threshold = 60; LTP/OI requirements retained
+PASS — Old 40-stock universe count = 40
+PASS — Telegram command strings present
+PASS — No place_order(), modify_order(), cancel_order(), or square-off execution code
+PASS — Feed supervisor + stale tick recovery code present
+PASS — Market-only internal keepalive present
+PASS — External GitHub Actions market keepalive present
+PASS — Gist autosave + restore present
+PASS — Historical-data signature mapper tested with a representative SDK method signature
+
+NOT CLAIMED AS OFFLINE-TESTED:
+- A real Kotak Neo production TOTP login
+- A real historical_data() response for this specific account
+- A full Render restart during live market hours
+- Actual signal profitability / win rate
+
+Those require a real deploy/account/market session. The code fails safely: historical backfill
+is best-effort, and a lost authenticated process asks for a fresh TOTP instead of fabricating
+session recovery.
