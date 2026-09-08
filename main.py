@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from neo_api_client import NeoAPI
 from neo_api_client.websocket.feed import WsToken, SFeedIndex, SFeedScrip
 
-APP_VERSION = "V7.3-HISTORY-PRELOAD-FIX"
+APP_VERSION = "V8.1-HYBRID-RELIABLE"
 IST = ZoneInfo("Asia/Kolkata")
 
 app = FastAPI(
@@ -715,7 +715,7 @@ def repair_index_timeframes_from_1m(symbol, force=False):
     return result
 
 
-def repair_all_index_timeframes_from_1m(force=False):
+def repair_all_index_timeframes_from_1m(force=True):
     summary = {}
     for symbol in SIGNAL_SYMBOLS:
         summary[symbol] = repair_index_timeframes_from_1m(symbol, force=force)
@@ -886,7 +886,7 @@ def apply_restored_state(payload, source):
 
     # Critical restart repair: reconstruct missing 5m/15m bars from the
     # already-persisted REAL completed 1m candles. Strategy logic is untouched.
-    repair_all_index_timeframes_from_1m(force=False)
+    repair_all_index_timeframes_from_1m(force=True)
 
     for symbol in STOCK_UNIVERSE:
         if isinstance(stock_one.get(symbol), list):
@@ -3707,7 +3707,9 @@ async def consume_index_tick(
 
     # Persist on 5-minute boundaries to keep GitHub writes modest.
     if closed_5m:
-        await save_state()
+        # A completed 5m candle is valuable warm-up state. Force-persist it so
+        # a Render restart cannot throw away the session's higher-TF history.
+        await save_state(force=True)
 
 
 async def consume_stock_tick(
@@ -3810,7 +3812,9 @@ async def consume_stock_tick(
         )
 
     if closed_5m:
-        await save_state()
+        # A completed 5m candle is valuable warm-up state. Force-persist it so
+        # a Render restart cannot throw away the session's higher-TF history.
+        await save_state(force=True)
 
 
 # =========================================================
@@ -3841,14 +3845,16 @@ def all_index_history_ready():
 
 
 def _historical_rows(response):
-    """Normalise the common SDK response shapes without inventing candles."""
+    """Normalize official SDK historical responses without fabricating data."""
     if response is None:
         return []
 
-    # pandas DataFrame (SDKs sometimes return one)
-    if hasattr(response, "to_dict") and not isinstance(response, dict):
+    # pandas DataFrame (some SDK/service layers return tabular data)
+    if hasattr(response, "to_dict"):
         try:
-            return response.to_dict("records")
+            records = response.to_dict("records")
+            if isinstance(records, list):
+                return records
         except Exception:
             pass
 
@@ -3858,38 +3864,39 @@ def _historical_rows(response):
     if not isinstance(response, dict):
         return []
 
-    for key in ("candles", "records", "items", "values", "result", "results"):
-        value = response.get(key)
-        if isinstance(value, list):
-            return value
-
-    data = response.get("data")
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        for key in ("candles", "records", "items", "values", "data", "result", "results"):
-            value = data.get(key)
+    # Search common envelopes recursively, but only return actual row lists.
+    queue = [response]
+    seen = set()
+    while queue:
+        node = queue.pop(0)
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, list):
+            return node
+        if not isinstance(node, dict):
+            continue
+        for key in ("candles", "records", "items", "values", "result", "results", "data"):
+            value = node.get(key)
             if isinstance(value, list):
                 return value
-
+            if isinstance(value, dict):
+                queue.append(value)
     return []
 
 
 def _historical_timestamp(value):
+    """Parse SDK candle timestamps safely (epoch sec/ms or common date strings)."""
     if value is None:
         return None
-
     if isinstance(value, (int, float)):
         raw = float(value)
-        # milliseconds -> seconds
         if raw > 10_000_000_000:
             raw /= 1000.0
         return int(raw)
-
     text = str(value).strip()
     if not text:
         return None
-
     try:
         raw = float(text)
         if raw > 10_000_000_000:
@@ -3897,25 +3904,15 @@ def _historical_timestamp(value):
         return int(raw)
     except Exception:
         pass
-
     text = text.replace("Z", "+00:00")
-    for fmt in (
-        None,
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
-        "%d-%b-%Y %H:%M:%S",
-    ):
+    for fmt in (None, "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%d-%b-%Y %H:%M:%S"):
         try:
-            if fmt is None:
-                dt = datetime.fromisoformat(text)
-            else:
-                dt = datetime.strptime(text, fmt)
+            dt = datetime.fromisoformat(text) if fmt is None else datetime.strptime(text, fmt)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=IST)
             return int(dt.timestamp())
         except Exception:
             continue
-
     return None
 
 
@@ -4008,9 +4005,12 @@ def _historical_call_sync(client, exchange_segment, instrument_token, interval):
     end_iso = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     try:
-        params = inspect.signature(method).parameters
-    except Exception:
+        signature = inspect.signature(method)
+        params = signature.parameters
+        runtime["historical_sdk_signature"] = str(signature)
+    except Exception as exc:
         params = {}
+        runtime["historical_sdk_signature"] = f"unavailable:{type(exc).__name__}:{exc}"
 
     aliases = {
         "exchange_segment": exchange_segment,
@@ -4100,7 +4100,7 @@ def historical_backfill_sync(client):
     errors = []
 
     interval_variants = {
-        1: ("1minute", "1min", "1m", "1"),
+        1: ("1minute", "1min", "1m", "minute", "1"),
         5: ("5minute", "5min", "5m", "5"),
         15: ("15minute", "15min", "15m", "15"),
     }
@@ -4198,7 +4198,7 @@ async def historical_backfill_if_needed(client):
     try:
         loaded = await asyncio.to_thread(historical_backfill_sync, client)
         if loaded:
-            repair_all_index_timeframes_from_1m(force=False)
+            repair_all_index_timeframes_from_1m(force=True)
             runtime["state_source"] = "gist_plus_kotak_historical"
             await save_state(force=True)
             print(f"[HISTORICAL_BACKFILL] loaded={loaded}", flush=True)
@@ -5281,7 +5281,13 @@ async def telegram_webhook(
             f"{index_readiness_text('SENSEX')}\n"
             f"State source: {runtime.get('state_source')}\n"
             f"Last save: {runtime.get('last_state_save_at')}\n"
-            f"Gist error: {runtime.get('last_state_save_error')}\n\n"
+            f"Gist error: {runtime.get('last_state_save_error')}\n"
+            f"Historical preload attempted: "
+            f"{'YES' if runtime.get('historical_backfill_attempted') else 'NO'}\n"
+            f"Historical loaded: {runtime.get('historical_backfill_loaded', 0)}\n"
+            f"Historical error: {runtime.get('historical_backfill_error') or 'None'}\n"
+            f"Historical SDK: {runtime.get('historical_sdk_signature') or 'not inspected'}\n"
+            f"TF repair: {runtime.get('timeframe_repair') or {}}\n\n"
             f"Evaluations: {runtime.get('evaluations', 0)}\n"
             f"Technical actionable: {runtime.get('technical_actionable', 0)}\n"
             f"Final actionable: {runtime.get('final_actionable', 0)}\n"
