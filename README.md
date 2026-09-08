@@ -129,3 +129,6 @@ This is a signal-analysis tool, not a performance guarantee. Trading decisions r
 
 ## V7.1 Telegram 429 fix
 See `PATCH_NOTES_V7.1_TELEGRAM_429.md`. The strategy is unchanged; only Telegram rate-limit/startup reliability was patched.
+
+## V7.2 restart-history fix
+V7.2 reconstructs missing completed 5m/15m candles from persisted **real completed 1m candles** after a Render restart. It does not relax or replace the original V7.3 strategy. Gist writes are also throttled/coalesced to reduce repeated 403 secondary-rate-limit errors.

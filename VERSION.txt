@@ -1,4 +1,1 @@
-KING BRO V7 FINAL ALL FIXED
-APP_VERSION=7.0.0
-Signal engine: Original V7.3 multi-timeframe score engine
-Execution: MANUAL_ONLY
+KING BRO V7.3 HISTORY PRELOAD FIX

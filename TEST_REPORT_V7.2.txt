@@ -1,0 +1,14 @@
+KING BRO V7.2 TEST REPORT
+
+PASS: Python AST parse
+PASS: py_compile
+PASS: direction_score unchanged vs V7.1
+PASS: grade_for_score unchanged vs V7.1
+PASS: evaluate_index_signal unchanged vs V7.1
+PASS: option_trade_plan unchanged vs V7.1
+PASS: evaluate_stock_signal unchanged vs V7.1
+PASS: completed 1m -> 5m aggregation test
+PASS: completed 1m -> 15m aggregation test
+PASS: incomplete/gapped bucket is rejected (no fabricated candle)
+
+Live Kotak/Telegram execution cannot be exercised in the offline build container; verify with /status after deployment.

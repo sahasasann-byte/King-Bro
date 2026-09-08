@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from neo_api_client import NeoAPI
 from neo_api_client.websocket.feed import WsToken, SFeedIndex, SFeedScrip
 
-APP_VERSION = "7.1.0"
+APP_VERSION = "V7.3-HISTORY-PRELOAD-FIX"
 IST = ZoneInfo("Asia/Kolkata")
 
 app = FastAPI(
@@ -68,7 +68,8 @@ SUPERVISOR_ENABLED = os.getenv("KINGBRO_SUPERVISOR_ENABLED", "true").strip().low
     "1", "true", "yes", "on",
 )
 FEED_STALE_SECONDS = int(os.getenv("KINGBRO_FEED_STALE_SECONDS", "120") or 120)
-AUTO_STATE_SAVE_SECONDS = int(os.getenv("KINGBRO_AUTO_STATE_SAVE_SECONDS", "300") or 300)
+AUTO_STATE_SAVE_SECONDS = int(os.getenv("KINGBRO_AUTO_STATE_SAVE_SECONDS", "900") or 900)
+STATE_SAVE_MIN_INTERVAL_SECONDS = int(os.getenv("KINGBRO_STATE_SAVE_MIN_INTERVAL_SECONDS", "240") or 240)
 
 # Official kotakneoapi 3.0.6 exposes historical_data(). This is best-effort only:
 # Gist restore remains the primary durable source, and a failed historical call never
@@ -634,6 +635,94 @@ def gist_request(method, path, payload=None):
         )
 
 
+def _aggregate_complete_buckets_from_1m(one_minute_rows, minutes):
+    """Build exact higher-timeframe OHLC from completed real 1m candles only.
+
+    A bucket is accepted only when every constituent 1m candle exists at the
+    expected 60-second timestamps. This is reconstruction, not synthetic data.
+    """
+    size = int(minutes) * 60
+    by_ts = {}
+    for row in one_minute_rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            ts = int(row.get("ts"))
+            o = float(row.get("open"))
+            h = float(row.get("high"))
+            l = float(row.get("low"))
+            c = float(row.get("close"))
+        except (TypeError, ValueError):
+            continue
+        by_ts[ts] = {"ts": ts, "open": o, "high": h, "low": l, "close": c, "ticks": int(row.get("ticks") or 0)}
+
+    grouped = {}
+    for ts, row in by_ts.items():
+        bucket = bucket_start(ts, minutes)
+        grouped.setdefault(bucket, []).append(row)
+
+    out = []
+    expected_count = int(minutes)
+    for bucket in sorted(grouped):
+        rows = sorted(grouped[bucket], key=lambda x: x["ts"])
+        expected = [bucket + 60 * i for i in range(expected_count)]
+        actual = [r["ts"] for r in rows]
+        if actual != expected:
+            continue
+        out.append({
+            "ts": bucket,
+            "open": rows[0]["open"],
+            "high": max(r["high"] for r in rows),
+            "low": min(r["low"] for r in rows),
+            "close": rows[-1]["close"],
+            "ticks": sum(int(r.get("ticks") or 0) for r in rows),
+        })
+    return out
+
+
+def repair_index_timeframes_from_1m(symbol, force=False):
+    """Repair 5m/15m histories from persisted real 1m candles.
+
+    This fixes Render-restart warm-up without changing the V7.3 strategy.
+    Existing higher-timeframe candles are preserved/merged by timestamp.
+    """
+    if symbol not in SIGNAL_SYMBOLS:
+        return {"5m_added": 0, "15m_added": 0}
+
+    one = list(candles_1m[symbol])
+    result = {}
+    for minutes, target, need in (
+        (5, candles_5m[symbol], INDEX_NEED_5M),
+        (15, candles_15m[symbol], INDEX_NEED_15M),
+    ):
+        if not force and len(target) >= need:
+            result[f"{minutes}m_added"] = 0
+            continue
+        derived = _aggregate_complete_buckets_from_1m(one, minutes)
+        merged = {
+            int(c["ts"]): dict(c)
+            for c in target
+            if isinstance(c, dict) and c.get("ts") is not None
+        }
+        before = len(merged)
+        for c in derived:
+            merged[int(c["ts"])] = c
+        ordered = [merged[k] for k in sorted(merged)]
+        target.clear()
+        for c in ordered[-target.maxlen:]:
+            target.append(c)
+        result[f"{minutes}m_added"] = max(0, len(merged) - before)
+    return result
+
+
+def repair_all_index_timeframes_from_1m(force=False):
+    summary = {}
+    for symbol in SIGNAL_SYMBOLS:
+        summary[symbol] = repair_index_timeframes_from_1m(symbol, force=force)
+    runtime["timeframe_repair"] = summary
+    return summary
+
+
 def serialisable_state():
     return {
         "version": APP_VERSION,
@@ -697,9 +786,19 @@ def save_state_sync():
     return True
 
 
-async def save_state():
+async def save_state(force=False):
     async with state_lock:
         try:
+            if not force:
+                previous = runtime.get("last_state_save_at")
+                if previous:
+                    try:
+                        age = (datetime.now(timezone.utc) - datetime.fromisoformat(previous)).total_seconds()
+                        if age < STATE_SAVE_MIN_INTERVAL_SECONDS:
+                            runtime["last_state_save_skip"] = f"throttled:{int(age)}s"
+                            return True
+                    except Exception:
+                        pass
             ok = await asyncio.to_thread(
                 save_state_sync
             )
@@ -784,6 +883,10 @@ def apply_restored_state(payload, source):
             if isinstance(candle, dict):
                 candles_15m[symbol].append(candle)
                 loaded += 1
+
+    # Critical restart repair: reconstruct missing 5m/15m bars from the
+    # already-persisted REAL completed 1m candles. Strategy logic is untouched.
+    repair_all_index_timeframes_from_1m(force=False)
 
     for symbol in STOCK_UNIVERSE:
         if isinstance(stock_one.get(symbol), list):
@@ -969,12 +1072,14 @@ async def restore_state():
         )
 
         if loaded:
-            await save_state()
+            await save_state(force=True)
 
     print(
         f"[STATE_RESTORE] "
         f"loaded={loaded} "
-        f"source={runtime.get('state_source')}",
+        f"source={runtime.get('state_source')} "
+        f"NIFTY=1m:{len(candles_1m['NIFTY 50'])}/5m:{len(candles_5m['NIFTY 50'])}/15m:{len(candles_15m['NIFTY 50'])} "
+        f"SENSEX=1m:{len(candles_1m['SENSEX'])}/5m:{len(candles_5m['SENSEX'])}/15m:{len(candles_15m['SENSEX'])}",
         flush=True,
     )
 
@@ -3518,6 +3623,7 @@ async def consume_index_tick(
         )
 
     closed_any = False
+    closed_1m = False
     closed_5m = False
 
     for (
@@ -3582,8 +3688,15 @@ async def consume_index_tick(
 
             closed_any = True
 
+            if minutes == 1:
+                closed_1m = True
             if minutes == 5:
                 closed_5m = True
+
+    # After a restart, rebuild any missing complete 5m/15m bars from real 1m
+    # history before the unchanged V7.3 strategy evaluates.
+    if closed_1m:
+        repair_index_timeframes_from_1m(symbol, force=False)
 
     # Evaluate on every completed candle boundary.
     # With previous state restored, this can work from 09:30 onward.
@@ -3745,7 +3858,7 @@ def _historical_rows(response):
     if not isinstance(response, dict):
         return []
 
-    for key in ("candles", "records", "items", "values"):
+    for key in ("candles", "records", "items", "values", "result", "results"):
         value = response.get(key)
         if isinstance(value, list):
             return value
@@ -3754,7 +3867,7 @@ def _historical_rows(response):
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        for key in ("candles", "records", "items", "values", "data"):
+        for key in ("candles", "records", "items", "values", "data", "result", "results"):
             value = data.get(key)
             if isinstance(value, list):
                 return value
@@ -3972,30 +4085,65 @@ def _historical_call_sync(client, exchange_segment, instrument_token, interval):
 
 
 def historical_backfill_sync(client):
+    """
+    Fill the ORIGINAL V7.3 warm-up from Kotak historical candles after login.
+
+    Primary path:
+      1) request completed 1-minute index candles
+      2) merge them with Gist/live 1m history
+      3) reconstruct exact complete 5m and 15m OHLC buckets from those real 1m bars
+
+    Direct 5m/15m historical requests are only a fallback. No synthetic candles
+    are invented and the original 22/21/9 strategy gate is unchanged.
+    """
     total = 0
     errors = []
 
     interval_variants = {
-        1: ("1minute", "1m", "1min", "1"),
-        5: ("5minute", "5m", "5min", "5"),
-        15: ("15minute", "15m", "15min", "15"),
+        1: ("1minute", "1min", "1m", "1"),
+        5: ("5minute", "5min", "5m", "5"),
+        15: ("15minute", "15min", "15m", "15"),
     }
 
     for symbol in SIGNAL_SYMBOLS:
         spec = INDEX_HISTORY_SPEC[symbol]
-        targets = (
-            (1, candles_1m[symbol], INDEX_NEED_1M),
+
+        # First get enough REAL 1m history. This is the most reliable way to
+        # make all three timeframes internally consistent.
+        one_ok = len(candles_1m[symbol]) >= 150
+        last_error = None
+        if not one_ok:
+            for interval in interval_variants[1]:
+                try:
+                    response = _historical_call_sync(
+                        client,
+                        spec["exchange_segment"],
+                        spec["instrument_token"],
+                        interval,
+                    )
+                    rows = _historical_rows(response)
+                    if rows:
+                        added = _merge_history(candles_1m[symbol], rows, 1)
+                        total += added
+                        if len(candles_1m[symbol]) >= INDEX_NEED_1M:
+                            break
+                    else:
+                        last_error = f"{interval}: no candle rows returned"
+                except Exception as exc:
+                    last_error = f"{interval}: {type(exc).__name__}: {exc}"
+
+        # Exact aggregation from completed real 1m candles.
+        repair_index_timeframes_from_1m(symbol, force=True)
+
+        # If 1m historical endpoint did not provide a long enough contiguous
+        # run, ask Kotak directly for the missing higher timeframe.
+        for minutes, target, need in (
             (5, candles_5m[symbol], INDEX_NEED_5M),
             (15, candles_15m[symbol], INDEX_NEED_15M),
-        )
-
-        for minutes, target, need in targets:
-            # Enough saved candles? Do not make unnecessary REST calls.
-            if len(target) >= need and (minutes != 1 or refresh_daily_levels(symbol).get("ready")):
+        ):
+            if len(target) >= need:
                 continue
-
-            success = False
-            last_error = None
+            tf_error = None
             for interval in interval_variants[minutes]:
                 try:
                     response = _historical_call_sync(
@@ -4007,18 +4155,29 @@ def historical_backfill_sync(client):
                     rows = _historical_rows(response)
                     if rows:
                         total += _merge_history(target, rows, minutes)
-                        success = True
-                        break
-                    last_error = "no candle rows returned"
+                        if len(target) >= need:
+                            break
+                    else:
+                        tf_error = f"{interval}: no candle rows returned"
                 except Exception as exc:
-                    last_error = f"{type(exc).__name__}: {exc}"
+                    tf_error = f"{interval}: {type(exc).__name__}: {exc}"
+            if len(target) < need and tf_error:
+                errors.append(f"{symbol} {minutes}m: {tf_error}")
 
-            if not success and last_error:
-                errors.append(f"{symbol} {minutes}m: {last_error}")
+        if len(candles_1m[symbol]) < INDEX_NEED_1M and last_error:
+            errors.append(f"{symbol} 1m: {last_error}")
 
     runtime["historical_backfill_attempted"] = True
     runtime["historical_backfill_loaded"] = total
     runtime["historical_backfill_error"] = "; ".join(errors[:6]) if errors else None
+
+    print(
+        "[HISTORY_READY_CHECK] "
+        f"NIFTY=1m:{len(candles_1m['NIFTY 50'])}/5m:{len(candles_5m['NIFTY 50'])}/15m:{len(candles_15m['NIFTY 50'])} "
+        f"SENSEX=1m:{len(candles_1m['SENSEX'])}/5m:{len(candles_5m['SENSEX'])}/15m:{len(candles_15m['SENSEX'])} "
+        f"loaded={total} error={runtime.get('historical_backfill_error')}",
+        flush=True,
+    )
     return total
 
 
@@ -4039,8 +4198,9 @@ async def historical_backfill_if_needed(client):
     try:
         loaded = await asyncio.to_thread(historical_backfill_sync, client)
         if loaded:
+            repair_all_index_timeframes_from_1m(force=False)
             runtime["state_source"] = "gist_plus_kotak_historical"
-            await save_state()
+            await save_state(force=True)
             print(f"[HISTORICAL_BACKFILL] loaded={loaded}", flush=True)
         elif runtime.get("historical_backfill_error"):
             print(
@@ -5200,7 +5360,7 @@ async def telegram_webhook(
         return {"ok": True}
 
     if text == "/save":
-        ok = await save_state()
+        ok = await save_state(force=True)
 
         await telegram_send(
             (
@@ -5664,7 +5824,7 @@ async def shutdown():
     # Best effort only: a hard platform kill may not give shutdown enough time.
     if GITHUB_TOKEN and STATE_GIST_ID:
         try:
-            await asyncio.wait_for(save_state(), timeout=8)
+            await asyncio.wait_for(save_state(force=True), timeout=8)
         except Exception as exc:
             print(
                 f"[SHUTDOWN_SAVE_FAILED] {type(exc).__name__}: {exc}",
