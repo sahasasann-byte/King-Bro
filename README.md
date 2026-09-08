@@ -1,4 +1,4 @@
-# KING BRO V7 FINAL — Telegram Only / Manual Signals
+# KING BRO V7.1 — Telegram 429 Safe / Manual Signals
 
 This build is the reliability-fixed successor to V6.1 and the Grok keepalive patch.
 It keeps the user's **original V7.3 multi-timeframe scoring strategy** as the primary
@@ -125,3 +125,7 @@ After deploy:
 4. `/status` should show `Broker: CONNECTED`, `Index feed: LIVE` and increasing/evaluating diagnostics.
 
 This is a signal-analysis tool, not a performance guarantee. Trading decisions remain manual.
+
+
+## V7.1 Telegram 429 fix
+See `PATCH_NOTES_V7.1_TELEGRAM_429.md`. The strategy is unchanged; only Telegram rate-limit/startup reliability was patched.

@@ -5,6 +5,8 @@ import os
 import re
 import urllib.parse
 import urllib.request
+import urllib.error
+import time
 from collections import deque
 from datetime import datetime, timezone, date, time as dt_time, timedelta
 from typing import Any, Optional
@@ -15,11 +17,11 @@ from pydantic import BaseModel, Field
 from neo_api_client import NeoAPI
 from neo_api_client.websocket.feed import WsToken, SFeedIndex, SFeedScrip
 
-APP_VERSION = "7.0.0"
+APP_VERSION = "7.1.0"
 IST = ZoneInfo("Asia/Kolkata")
 
 app = FastAPI(
-    title="KING BRO V7 Final Reliable Telegram",
+    title="KING BRO V7.1 Telegram 429 Safe",
     version=APP_VERSION,
 )
 
@@ -337,6 +339,24 @@ def update_candle(candle, price):
 # =========================================================
 # TELEGRAM
 # =========================================================
+class TelegramRateLimit(RuntimeError):
+    def __init__(self, retry_after=1, detail="Telegram 429 Too Many Requests"):
+        self.retry_after = max(1, int(retry_after or 1))
+        super().__init__(f"{detail}; retry_after={self.retry_after}s")
+
+
+telegram_send_lock = asyncio.Lock()
+telegram_last_send_monotonic = 0.0
+telegram_diag = {
+    "last_send_ok_at": None,
+    "last_send_error": None,
+    "last_429_at": None,
+    "last_retry_after": None,
+    "webhook_setup_action": None,
+    "commands_setup_action": None,
+}
+
+
 def telegram_keyboard():
     return {
         "keyboard": [
@@ -372,12 +392,50 @@ def telegram_api(method, payload=None):
         },
     )
 
-    with urllib.request.urlopen(request, timeout=15) as response:
-        data = json.loads(
-            response.read().decode("utf-8")
-        )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            raw = response.read().decode("utf-8")
+            data = json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        raw = ""
+        try:
+            raw = exc.read().decode("utf-8")
+        except Exception:
+            pass
+
+        data = None
+        if raw:
+            try:
+                data = json.loads(raw)
+            except Exception:
+                data = None
+
+        if exc.code == 429:
+            retry_after = None
+            if isinstance(data, dict):
+                retry_after = (
+                    (data.get("parameters") or {}).get("retry_after")
+                )
+            if retry_after is None:
+                try:
+                    retry_after = int(exc.headers.get("Retry-After") or 1)
+                except Exception:
+                    retry_after = 1
+            description = (
+                data.get("description")
+                if isinstance(data, dict)
+                else "Telegram 429 Too Many Requests"
+            )
+            raise TelegramRateLimit(retry_after, description) from exc
+
+        raise RuntimeError(
+            f"Telegram HTTP {exc.code}: {raw or exc.reason}"
+        ) from exc
 
     if not data.get("ok"):
+        if int(data.get("error_code") or 0) == 429:
+            retry_after = (data.get("parameters") or {}).get("retry_after") or 1
+            raise TelegramRateLimit(retry_after, data.get("description") or "Telegram 429")
         raise RuntimeError(
             f"Telegram API error: {data}"
         )
@@ -386,6 +444,8 @@ def telegram_api(method, payload=None):
 
 
 async def telegram_send(message, with_keyboard=False):
+    global telegram_last_send_monotonic
+
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("[TELEGRAM_DISABLED]", flush=True)
         return False
@@ -401,27 +461,50 @@ async def telegram_send(message, with_keyboard=False):
             telegram_keyboard()
         )
 
-    last_error = None
+    # Serialize all sends from this process and keep a safe per-chat gap.
+    # This prevents /status + startup/relogin bursts from tripping Telegram's
+    # per-chat flood control.
+    async with telegram_send_lock:
+        elapsed = time.monotonic() - telegram_last_send_monotonic
+        if elapsed < 1.20:
+            await asyncio.sleep(1.20 - elapsed)
 
-    for attempt in range(1, 4):
-        try:
-            await asyncio.to_thread(
-                telegram_api,
-                "sendMessage",
-                payload,
-            )
-            return True
-        except Exception as exc:
-            last_error = exc
-            if attempt < 3:
-                await asyncio.sleep(1.25)
+        last_error = None
+        for attempt in range(1, 6):
+            try:
+                await asyncio.to_thread(
+                    telegram_api,
+                    "sendMessage",
+                    payload,
+                )
+                telegram_last_send_monotonic = time.monotonic()
+                telegram_diag["last_send_ok_at"] = datetime.now(timezone.utc).isoformat()
+                telegram_diag["last_send_error"] = None
+                return True
+            except TelegramRateLimit as exc:
+                last_error = exc
+                telegram_diag["last_429_at"] = datetime.now(timezone.utc).isoformat()
+                telegram_diag["last_retry_after"] = exc.retry_after
+                telegram_diag["last_send_error"] = str(exc)
+                wait_for = min(max(float(exc.retry_after) + 0.35, 1.35), 90.0)
+                print(
+                    f"[TELEGRAM_429] retry_after={exc.retry_after}s attempt={attempt}/5",
+                    flush=True,
+                )
+                if attempt < 5:
+                    await asyncio.sleep(wait_for)
+            except Exception as exc:
+                last_error = exc
+                telegram_diag["last_send_error"] = f"{type(exc).__name__}: {exc}"
+                if attempt < 5:
+                    await asyncio.sleep(min(1.5 * attempt, 6.0))
 
-    print(
-        f"[TELEGRAM_SEND_FAILED] "
-        f"{type(last_error).__name__}: {last_error}",
-        flush=True,
-    )
-    return False
+        print(
+            f"[TELEGRAM_SEND_FAILED] "
+            f"{type(last_error).__name__}: {last_error}",
+            flush=True,
+        )
+        return False
 
 
 async def delete_telegram_message(chat_id, message_id):
@@ -445,21 +528,30 @@ async def setup_telegram():
     ):
         return
 
-    payload = {
-        "url": f"{PUBLIC_URL}/telegram/webhook",
-        "drop_pending_updates": "false",
-    }
+    desired_url = f"{PUBLIC_URL}/telegram/webhook"
 
-    if TELEGRAM_WEBHOOK_SECRET:
-        payload["secret_token"] = (
-            TELEGRAM_WEBHOOK_SECRET
-        )
+    # Do not hammer setWebhook on every Render deploy. If Telegram already
+    # points to this exact service, leave it untouched. This materially cuts
+    # 429s during rapid redeploys / overlapping old+new instances.
+    current_url = None
+    try:
+        info = await asyncio.to_thread(telegram_api, "getWebhookInfo", {})
+        current_url = str((info.get("result") or {}).get("url") or "")
+    except Exception as exc:
+        print(f"[TELEGRAM_WEBHOOK_INFO_FAILED] {type(exc).__name__}: {exc}", flush=True)
 
-    await asyncio.to_thread(
-        telegram_api,
-        "setWebhook",
-        payload,
-    )
+    if current_url != desired_url:
+        payload = {
+            "url": desired_url,
+            "drop_pending_updates": "false",
+        }
+        if TELEGRAM_WEBHOOK_SECRET:
+            payload["secret_token"] = TELEGRAM_WEBHOOK_SECRET
+        await asyncio.to_thread(telegram_api, "setWebhook", payload)
+        telegram_diag["webhook_setup_action"] = "updated"
+    else:
+        telegram_diag["webhook_setup_action"] = "already_correct"
+        print("[TELEGRAM_WEBHOOK] already correct; setWebhook skipped", flush=True)
 
     commands = [
         {"command": "login", "description": "Login: /login 123456"},
@@ -473,11 +565,29 @@ async def setup_telegram():
         {"command": "help", "description": "Show controls"},
     ]
 
-    await asyncio.to_thread(
-        telegram_api,
-        "setMyCommands",
-        {"commands": json.dumps(commands)},
-    )
+    try:
+        existing = await asyncio.to_thread(telegram_api, "getMyCommands", {})
+        existing_commands = existing.get("result") or []
+    except Exception:
+        existing_commands = None
+
+    if existing_commands != commands:
+        try:
+            await asyncio.to_thread(
+                telegram_api,
+                "setMyCommands",
+                {"commands": json.dumps(commands)},
+            )
+            telegram_diag["commands_setup_action"] = "updated"
+        except TelegramRateLimit as exc:
+            # Commands are cosmetic. Do not make startup fail because Telegram
+            # temporarily rate-limited setMyCommands.
+            telegram_diag["commands_setup_action"] = f"rate_limited:{exc.retry_after}s"
+            print(f"[TELEGRAM_COMMANDS_429] retry_after={exc.retry_after}s; skipped", flush=True)
+    else:
+        telegram_diag["commands_setup_action"] = "already_correct"
+
+
 
 
 # =========================================================
@@ -4131,14 +4241,15 @@ async def send_relogin_notice(reason):
         except Exception:
             pass
 
-    runtime["last_relogin_notice_at"] = now.isoformat()
-    await telegram_send(
+    ok = await telegram_send(
         "⚠️ KING BRO — KOTAK RELOGIN REQUIRED\n\n"
         f"Reason: {reason}\n"
         "Candle history is safe in Gist.\n"
         "Send /login CURRENT_TOTP once to resume live signals.",
         with_keyboard=True,
     )
+    if ok:
+        runtime["last_relogin_notice_at"] = now.isoformat()
 
 
 # =========================================================
@@ -5128,6 +5239,31 @@ async def telegram_webhook(
 # =========================================================
 # HTTP HEALTH / FALLBACK LOGIN
 # =========================================================
+@app.get("/api/telegram/diag")
+async def telegram_diagnostics():
+    result = {
+        "configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        "public_webhook_target": f"{PUBLIC_URL}/telegram/webhook" if PUBLIC_URL else None,
+        "send": dict(telegram_diag),
+    }
+
+    if TELEGRAM_BOT_TOKEN:
+        try:
+            info = await asyncio.to_thread(telegram_api, "getWebhookInfo", {})
+            data = info.get("result") or {}
+            result["webhook"] = {
+                "url": data.get("url"),
+                "pending_update_count": data.get("pending_update_count"),
+                "last_error_date": data.get("last_error_date"),
+                "last_error_message": data.get("last_error_message"),
+                "max_connections": data.get("max_connections"),
+            }
+        except Exception as exc:
+            result["webhook_error"] = f"{type(exc).__name__}: {exc}"
+
+    return result
+
+
 @app.get("/")
 async def root():
     return {
@@ -5499,28 +5635,25 @@ async def startup():
         name="kingbro-gist-autosave",
     )
 
-    ready = all_index_history_ready()
-    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-        await telegram_send(
-            "👑 KING BRO V7 FINAL backend ready.\n\n"
-            f"State restored: {loaded} candles\n"
-            f"{index_readiness_text('NIFTY 50')}\n"
-            f"{index_readiness_text('SENSEX')}\n"
-            f"History: {'✅ READY' if ready else '⚠️ NEEDS BACKFILL/WARM-UP'}\n\n"
-            "Morning: send /login CURRENT_TOTP once.\n"
-            "Signals: 09:30–15:30 IST.\n"
-            "Original V7.3 strategy is unchanged.\n"
-            "Stocks remain OFF unless /stockon is pressed.",
-            with_keyboard=True,
-        )
+    # Keep Render startup Telegram-quiet. During a rolling deploy the old and
+    # new instances overlap briefly; automatic startup messages from both can
+    # trigger Telegram 429 flood control and then block /status replies.
+    # User commands remain active immediately. Only a genuine market-hours
+    # relogin warning is scheduled, and telegram_send() itself obeys 429
+    # retry_after + per-chat pacing.
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID and feed_window_open() and neo_client is None:
+        runtime["relogin_required"] = True
 
-        # A process restart destroys the authenticated NeoAPI object. Tell the
-        # user immediately during market hours; candle history remains safe.
-        if feed_window_open() and neo_client is None:
-            runtime["relogin_required"] = True
+        async def _delayed_market_relogin_notice():
+            await asyncio.sleep(6)
             await send_relogin_notice(
                 "Backend started/restarted during the market feed window."
             )
+
+        asyncio.create_task(
+            _delayed_market_relogin_notice(),
+            name="kingbro-startup-relogin-notice",
+        )
 
 
 @app.on_event("shutdown")
