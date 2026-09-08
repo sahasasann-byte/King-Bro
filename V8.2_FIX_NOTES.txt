@@ -1,0 +1,21 @@
+KING BRO V8.2 SMART FIX
+
+Fixed from the live V8.1 diagnostics:
+1. Telegram status header is now dynamic and shows V8.2-SMART-FIX.
+2. Kotak historical_data adapter now honors the exact deployed SDK signature:
+   historical_data(neosymbol, interval, from_date, to_date)
+3. exchange_segment/instrument_token are no longer incorrectly passed to that signature.
+4. Explicit index NeoSymbols are supplied.
+5. Date-string fallback formats and interval aliases remain diagnostic-safe.
+6. /status shows the last historical request for fast verification.
+7. Original signal strategy, readiness gates, Telegram 429 protection, Gist persistence,
+   stock ON/OFF and MANUAL_ONLY execution are unchanged.
+8. No partial/fake higher-timeframe candles are accepted.
+
+Verification after deploy:
+- /login CURRENT_TOTP
+- wait ~20-30 seconds
+- /status
+Expected: header V8.2-SMART-FIX; Historical preload attempted YES.
+If the broker accepts index history, Historical loaded > 0 and/or 15M reaches >=9.
+If it rejects the NeoSymbol/interval/date, /status exposes the exact error/request.

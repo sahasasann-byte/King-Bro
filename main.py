@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from neo_api_client import NeoAPI
 from neo_api_client.websocket.feed import WsToken, SFeedIndex, SFeedScrip
 
-APP_VERSION = "V8.1-HYBRID-RELIABLE"
+APP_VERSION = "V8.2-SMART-FIX"
 IST = ZoneInfo("Asia/Kolkata")
 
 app = FastAPI(
@@ -3824,10 +3824,12 @@ INDEX_HISTORY_SPEC = {
     "NIFTY 50": {
         "exchange_segment": "nse_cm",
         "instrument_token": "Nifty 50",
+        "neosymbol": "nse_cm|Nifty 50",
     },
     "SENSEX": {
         "exchange_segment": "bse_cm",
         "instrument_token": "SENSEX",
+        "neosymbol": "bse_cm|SENSEX",
     },
 }
 
@@ -3987,11 +3989,16 @@ def _merge_history(target, rows, minutes):
     return max(0, len(merged) - before)
 
 
-def _historical_call_sync(client, exchange_segment, instrument_token, interval):
+def _historical_call_sync(client, exchange_segment, instrument_token, interval, neosymbol=None):
     """
-    Call official kotakneoapi historical_data() using signature introspection.
-    v3.0.6 exposes this method; argument names are mapped conservatively.
-    If an account/API variant rejects the request, caller falls back to Gist/live.
+    Kotak Neo v3.0.6 adapter.
+
+    The running SDK has reported:
+      historical_data(neosymbol, interval, from_date, to_date)
+
+    Use that exact signature when present. Older/alternate signatures remain
+    supported by introspection, but we never send exchange_segment or
+    instrument_token to a method that only accepts neosymbol.
     """
     method = getattr(client, "historical_data", None)
     if not callable(method):
@@ -3999,10 +4006,16 @@ def _historical_call_sync(client, exchange_segment, instrument_token, interval):
 
     end_dt = datetime.now(IST)
     start_dt = end_dt - timedelta(days=max(2, HISTORICAL_LOOKBACK_DAYS))
-    start_date = start_dt.strftime("%Y-%m-%d")
-    end_date = end_dt.strftime("%Y-%m-%d")
-    start_iso = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-    end_iso = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    # SDK docs/runtime signature require strings. Try the normal ISO date first;
+    # API-format errors are retried with common timestamp forms below.
+    date_pairs = [
+        (start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")),
+        (start_dt.strftime("%d-%m-%Y"), end_dt.strftime("%d-%m-%Y")),
+        (start_dt.strftime("%Y-%m-%d %H:%M:%S"), end_dt.strftime("%Y-%m-%d %H:%M:%S")),
+    ]
+
+    neo = neosymbol or f"{exchange_segment}|{instrument_token}"
 
     try:
         signature = inspect.signature(method)
@@ -4012,7 +4025,39 @@ def _historical_call_sync(client, exchange_segment, instrument_token, interval):
         params = {}
         runtime["historical_sdk_signature"] = f"unavailable:{type(exc).__name__}:{exc}"
 
+    names = {name for name in params if name != "self"}
+
+    # Exact v3.0.6 path observed on the deployed service.
+    if {"neosymbol", "interval", "from_date", "to_date"}.issubset(names):
+        last_exc = None
+        for from_date, to_date in date_pairs:
+            try:
+                runtime["historical_last_request"] = {
+                    "neosymbol": neo,
+                    "interval": interval,
+                    "from_date": from_date,
+                    "to_date": to_date,
+                }
+                return method(
+                    neosymbol=neo,
+                    interval=interval,
+                    from_date=from_date,
+                    to_date=to_date,
+                )
+            except TypeError:
+                raise
+            except Exception as exc:
+                last_exc = exc
+                # Retry only date formatting; caller will try interval aliases.
+                continue
+        if last_exc:
+            raise last_exc
+
+    # Compatibility path for any future/alternate SDK shape.
+    start_date, end_date = date_pairs[0]
+    start_iso, end_iso = date_pairs[2]
     aliases = {
+        "neosymbol": neo,
         "exchange_segment": exchange_segment,
         "exchange": exchange_segment,
         "segment": exchange_segment,
@@ -4037,7 +4082,7 @@ def _historical_call_sync(client, exchange_segment, instrument_token, interval):
     }
 
     kwargs = {}
-    required_missing = []
+    missing = []
     for name, param in params.items():
         if name == "self":
             continue
@@ -4047,41 +4092,15 @@ def _historical_call_sync(client, exchange_segment, instrument_token, interval):
             inspect.Parameter.VAR_POSITIONAL,
             inspect.Parameter.VAR_KEYWORD,
         ):
-            required_missing.append(name)
+            missing.append(name)
 
-    if params and not required_missing:
+    if params and not missing:
+        runtime["historical_last_request"] = dict(kwargs)
         return method(**kwargs)
 
-    # Conservative fallbacks for SDK naming variants. Only TypeError advances
-    # to the next shape; real API errors are surfaced immediately.
-    attempts = [
-        dict(
-            exchange_segment=exchange_segment,
-            instrument_token=instrument_token,
-            interval=interval,
-            from_date=start_date,
-            to_date=end_date,
-        ),
-        dict(
-            exchange_segment=exchange_segment,
-            instrument_token=instrument_token,
-            interval=interval,
-            start_time=start_iso,
-            end_time=end_iso,
-        ),
-    ]
-
-    last_type_error = None
-    for candidate in attempts:
-        try:
-            return method(**candidate)
-        except TypeError as exc:
-            last_type_error = exc
-            continue
-
-    if last_type_error:
-        raise last_type_error
-    raise RuntimeError("Historical data call could not be constructed")
+    raise RuntimeError(
+        f"Unsupported historical_data signature: {runtime.get('historical_sdk_signature')}"
+    )
 
 
 def historical_backfill_sync(client):
@@ -4120,6 +4139,7 @@ def historical_backfill_sync(client):
                         spec["exchange_segment"],
                         spec["instrument_token"],
                         interval,
+                        spec.get("neosymbol"),
                     )
                     rows = _historical_rows(response)
                     if rows:
@@ -4151,6 +4171,7 @@ def historical_backfill_sync(client):
                         spec["exchange_segment"],
                         spec["instrument_token"],
                         interval,
+                        spec.get("neosymbol"),
                     )
                     rows = _historical_rows(response)
                     if rows:
@@ -5264,7 +5285,7 @@ async def telegram_webhook(
         tick_age = last_tick_age_seconds()
         scores = runtime.get("last_score_by_symbol") or {}
         await telegram_send(
-            "👑 KING BRO V7 STATUS\n\n"
+            f"👑 KING BRO {APP_VERSION} STATUS\n\n"
             f"Broker: "
             f"{'CONNECTED' if runtime['broker_connected'] else 'OFFLINE'}\n"
             f"Index feed: "
@@ -5287,6 +5308,7 @@ async def telegram_webhook(
             f"Historical loaded: {runtime.get('historical_backfill_loaded', 0)}\n"
             f"Historical error: {runtime.get('historical_backfill_error') or 'None'}\n"
             f"Historical SDK: {runtime.get('historical_sdk_signature') or 'not inspected'}\n"
+            f"Historical request: {runtime.get('historical_last_request') or 'None'}\n"
             f"TF repair: {runtime.get('timeframe_repair') or {}}\n\n"
             f"Evaluations: {runtime.get('evaluations', 0)}\n"
             f"Technical actionable: {runtime.get('technical_actionable', 0)}\n"
