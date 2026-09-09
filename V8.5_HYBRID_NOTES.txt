@@ -1,0 +1,26 @@
+KING BRO V8.5 HYBRID FINAL
+
+Base
+- Grok V8.4 OPTION-LTP-FIX.
+
+Kept from Grok
+- Deep/nested Kotak quote parsing.
+- all -> ltp -> oi -> market_depth -> depth compatibility.
+- V8.3 memory-safe buffers (780/100/60).
+- Historical/Gist restoration, Telegram 429 handling, supervisor/keepalive.
+- Original index + old 40-stock strategy behavior.
+
+Improved
+- Batch ALL for up to 8 nearest option candidates.
+- Batch LTP fallback only for candidates still missing premium.
+- Fetch OI/depth only for selected contract.
+- Lower API burst / timeout / memory pressure.
+- Better option diagnostics in /status.
+
+Safety/accuracy
+- Entry premium MUST be a genuine last-traded price.
+- average_price, close_price, pClose are NOT accepted as LTP.
+- bid/ask midpoint, ask-only, bid-only are NOT accepted as LTP.
+- bid/ask are used only for liquidity/spread analysis.
+- No synthetic premium.
+- Existing OI/liquidity threshold and original strategy/score/R:R are unchanged.

@@ -19,11 +19,11 @@ from pydantic import BaseModel, Field
 from neo_api_client import NeoAPI
 from neo_api_client.websocket.feed import WsToken, SFeedIndex, SFeedScrip
 
-APP_VERSION = "V8.3-MEMORY-SAFE"
+APP_VERSION = "V8.5-HYBRID-FINAL"
 IST = ZoneInfo("Asia/Kolkata")
 
 app = FastAPI(
-    title="KING BRO V7.1 Telegram 429 Safe",
+    title="KING BRO V8.4 Option LTP Fix",
     version=APP_VERSION,
 )
 
@@ -250,22 +250,62 @@ def number(value):
     try:
         if value is None or value == "":
             return None
-        return float(str(value).replace(",", ""))
+        if isinstance(value, (list, dict, bool)):
+            return None
+        text = str(value).strip().replace(",", "")
+        if not text or text.lower() in {"nan", "none", "null", "-"}:
+            return None
+        return float(text)
     except Exception:
         return None
 
 
 def normalise_rows(response):
+    """Flatten Kotak quote/search payloads into a list of dict rows."""
     if response is None:
         return []
     if isinstance(response, list):
-        return response
-    if isinstance(response, dict):
-        data = response.get("data")
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            return [data]
+        return [r for r in response if isinstance(r, dict)]
+    if not isinstance(response, dict):
+        return []
+
+    # Common wrappers used by Neo SDK / gateway
+    for key in (
+        "data",
+        "quotes",
+        "result",
+        "results",
+        "scrip_data",
+        "scripData",
+        "message",
+    ):
+        node = response.get(key)
+        if isinstance(node, list):
+            return [r for r in node if isinstance(r, dict)]
+        if isinstance(node, dict):
+            # Nested list inside data
+            for inner in ("quotes", "data", "result", "results"):
+                if isinstance(node.get(inner), list):
+                    return [
+                        r for r in node[inner]
+                        if isinstance(r, dict)
+                    ]
+            # Single quote object
+            return [node]
+
+    # Whole response itself looks like a quote row
+    if any(
+        k in response
+        for k in (
+            "ltp",
+            "last_traded_price",
+            "lastPrice",
+            "instrument_token",
+            "pSymbol",
+        )
+    ):
+        return [response]
+
     return []
 
 
@@ -2269,36 +2309,240 @@ def merge_quote(base, extra):
     return merged
 
 
+def _deep_number(row, keys):
+    """Read first numeric value for any of the keys, including one nested level."""
+    if not isinstance(row, dict):
+        return None
+
+    for key in keys:
+        val = number(row.get(key))
+        if val is not None:
+            return val
+
+    # Nested dicts often used by Neo payloads
+    for nest_key in (
+        "data",
+        "quote",
+        "quotes",
+        "ohlc",
+        "market_data",
+        "marketData",
+        "values",
+    ):
+        nested = row.get(nest_key)
+        if isinstance(nested, dict):
+            for key in keys:
+                val = number(nested.get(key))
+                if val is not None:
+                    return val
+        if isinstance(nested, list) and nested:
+            first = nested[0]
+            if isinstance(first, dict):
+                for key in keys:
+                    val = number(first.get(key))
+                    if val is not None:
+                        return val
+    return None
+
+
 def row_ltp(row):
-    return (
-        number(row.get("ltp"))
-        or
-        number(
-            row.get(
-                "last_traded_price"
-            )
-        )
-        or
-        number(row.get("lp"))
+    """
+    Extract only a genuine last-traded option premium.
+
+    Deliberately NOT accepted as LTP:
+    - average price
+    - previous/close price
+    - bid/ask midpoint
+    - lone bid or ask
+
+    Bid/ask remain useful for liquidity/spread checks, but Entry/SL/Targets must
+    be based on a real traded premium.
+    """
+    ltp = _deep_number(
+        row,
+        (
+            "ltp",
+            "LTP",
+            "last_traded_price",
+            "lastTradedPrice",
+            "last_price",
+            "lastPrice",
+            "last_trade_price",
+            "lastTradePrice",
+            "lp",
+            "last",
+        ),
     )
+    if ltp is not None and ltp > 0:
+        return ltp
+    return None
 
 
 def row_oi(row):
-    return (
-        number(
-            row.get(
-                "open_int"
-            )
-        )
-        or
-        number(row.get("oi"))
-        or
-        number(
-            row.get(
-                "open_interest"
-            )
-        )
+    return _deep_number(
+        row,
+        (
+            "open_int",
+            "open_interest",
+            "openInterest",
+            "oi",
+            "OI",
+            "oI",
+        ),
     )
+
+
+def _quote_rows_sync(instrument_tokens, quote_type="all"):
+    """One Kotak quote call for one or many contracts."""
+    if neo_client is None:
+        raise RuntimeError("Kotak login required")
+
+    response = neo_client.quotes(
+        instrument_tokens=instrument_tokens,
+        quote_type=quote_type,
+    )
+    rows = normalise_rows(response)
+
+    runtime["option_quote_last_type"] = quote_type
+    runtime["option_quote_last_rows"] = len(rows)
+    runtime["option_quote_last_error"] = None
+    runtime["option_quote_last_keys"] = (
+        sorted(list(rows[0].keys()))[:40]
+        if rows and isinstance(rows[0], dict)
+        else []
+    )
+    return rows
+
+
+def _quote_row_token(row):
+    if not isinstance(row, dict):
+        return ""
+    return str(
+        row.get("exchange_token")
+        or row.get("instrument_token")
+        or row.get("token")
+        or row.get("pSymbol")
+        or ""
+    ).strip()
+
+
+def _map_rows_to_candidates(rows, candidates):
+    mapped = {}
+    by_token = {
+        str(c["instrument_token"]): c
+        for c in candidates
+    }
+
+    for row in rows or []:
+        token = _quote_row_token(row)
+        if token and token in by_token:
+            mapped[token] = row
+
+    # Some quote payloads omit the token in the row; preserve request order.
+    if not mapped and len(rows or []) == len(candidates):
+        for c, row in zip(candidates, rows):
+            mapped[str(c["instrument_token"])] = row
+
+    return mapped
+
+
+def quote_batch_candidates_sync(candidates, exchange_segment):
+    """
+    Efficient real-premium discovery:
+      1) one batched ALL request
+      2) one batched LTP request only for still-missing premiums
+
+    OI/depth are fetched only for the chosen contract later.
+    """
+    req = [
+        {
+            "instrument_token": str(c["instrument_token"]),
+            "exchange_segment": exchange_segment,
+        }
+        for c in candidates
+    ]
+    merged = {
+        str(c["instrument_token"]): {}
+        for c in candidates
+    }
+    errors = []
+
+    try:
+        rows = _quote_rows_sync(req, "all")
+        mapped = _map_rows_to_candidates(rows, candidates)
+        for token, row in mapped.items():
+            merged[token] = merge_quote(merged[token], row)
+    except Exception as exc:
+        errors.append(f"all:{type(exc).__name__}:{exc}")
+
+    missing = [
+        c for c in candidates
+        if not row_ltp(merged[str(c["instrument_token"])])
+    ]
+
+    if missing:
+        try:
+            req2 = [
+                {
+                    "instrument_token": str(c["instrument_token"]),
+                    "exchange_segment": exchange_segment,
+                }
+                for c in missing
+            ]
+            rows2 = _quote_rows_sync(req2, "ltp")
+            mapped2 = _map_rows_to_candidates(rows2, missing)
+            for token, row in mapped2.items():
+                merged[token] = merge_quote(merged[token], row)
+        except Exception as exc:
+            errors.append(f"ltp:{type(exc).__name__}:{exc}")
+
+    runtime["option_quote_batch_errors"] = errors[-5:]
+    return merged
+
+
+def enrich_selected_option_quote_sync(instrument_token, exchange_segment, base):
+    """
+    Get real OI/depth only for the selected option.
+    Existing Grok fallback names are retained, but no synthetic LTP is allowed.
+    """
+    merged = dict(base or {})
+
+    if exchange_segment.lower().endswith("_fo") and not row_oi(merged):
+        try:
+            merged = merge_quote(
+                merged,
+                quote_once_sync(
+                    instrument_token,
+                    exchange_segment,
+                    "oi",
+                ),
+            )
+        except Exception as exc:
+            runtime["option_quote_last_error"] = (
+                f"oi:{type(exc).__name__}:{exc}"
+            )
+
+    depth = merged.get("depth") or {}
+    if not (depth.get("buy") and depth.get("sell")):
+        for quote_type in ("market_depth", "depth"):
+            try:
+                merged = merge_quote(
+                    merged,
+                    quote_once_sync(
+                        instrument_token,
+                        exchange_segment,
+                        quote_type,
+                    ),
+                )
+            except Exception as exc:
+                runtime["option_quote_last_error"] = (
+                    f"{quote_type}:{type(exc).__name__}:{exc}"
+                )
+            depth = merged.get("depth") or {}
+            if depth.get("buy") and depth.get("sell"):
+                break
+
+    return merged
 
 
 def quote_with_fallback_sync(
@@ -2753,38 +2997,34 @@ async def auto_discover_option(
                 "No exact current/future nearest-expiry option candidates.",
         }
 
-    # Check 8 nearest-expiry ATM-neighbourhood contracts.
+    # Check 8 nearest-expiry ATM-neighbourhood contracts using batched quotes.
+    short_list = candidates[:8]
     inspected = []
 
-    for candidate in candidates[:8]:
-        try:
-            quote_row = (
-                await asyncio.to_thread(
-                    quote_with_fallback_sync,
-                    candidate[
-                        "instrument_token"
-                    ],
-                    exchange_segment,
-                )
-            )
+    try:
+        batch_quotes = await asyncio.to_thread(
+            quote_batch_candidates_sync,
+            short_list,
+            exchange_segment,
+        )
+    except Exception as exc:
+        batch_quotes = {}
+        runtime["option_quote_last_error"] = (
+            f"batch:{type(exc).__name__}:{exc}"
+        )
 
-            analysis = (
-                analyse_option_quote(
-                    quote_row
-                )
-            )
-
-            inspected.append({
-                **candidate,
-                "quote": analysis,
-            })
-
-        except Exception as exc:
-            inspected.append({
-                **candidate,
-                "quote_error":
-                    f"{type(exc).__name__}: {exc}",
-            })
+    for candidate in short_list:
+        token = str(candidate["instrument_token"])
+        quote_row = batch_quotes.get(token, {})
+        inspected.append({
+            **candidate,
+            "quote_raw_keys": (
+                sorted(list(quote_row.keys()))[:40]
+                if isinstance(quote_row, dict)
+                else []
+            ),
+            "quote": analyse_option_quote(quote_row),
+        })
 
     usable = [
         item
@@ -2804,10 +3044,23 @@ async def auto_discover_option(
     ]
 
     if not usable:
+        # One-line diagnostic: what keys did quote rows actually contain?
+        sample_keys = []
+        for item in inspected[:3]:
+            q = item.get("quote") or {}
+            raw = item.get("quote_error") or sorted(
+                [k for k in q.keys() if k != "liquidity_reasons"]
+            )
+            sample_keys.append(str(raw)[:120])
+        print(
+            f"[OPTION_QUOTE_DIAG] {symbol} {direction} "
+            f"checked={len(inspected)} usable=0 keys={sample_keys}",
+            flush=True,
+        )
         return {
             "ready": False,
             "reason":
-                "Nearest-expiry candidates found but no usable live option premium after all→ltp fallback.",
+                "Nearest-expiry candidates found but no genuine positive last-traded option premium was returned by Kotak Quotes.",
             "candidates_checked":
                 inspected,
         }
@@ -2835,6 +3088,33 @@ async def auto_discover_option(
     )
 
     selected = usable[0]
+
+    try:
+        selected_token = str(selected["instrument_token"])
+        selected_raw = batch_quotes.get(selected_token, {})
+        enriched = await asyncio.to_thread(
+            enrich_selected_option_quote_sync,
+            selected_token,
+            exchange_segment,
+            selected_raw,
+        )
+        selected["quote"] = analyse_option_quote(enriched)
+        selected["quote_raw_keys"] = sorted(list(enriched.keys()))[:40]
+    except Exception as exc:
+        runtime["option_quote_last_error"] = (
+            f"selected_enrich:{type(exc).__name__}:{exc}"
+        )
+
+    runtime["option_quote_last_candidate"] = {
+        "symbol": symbol,
+        "direction": direction,
+        "contract": selected.get("trading_symbol"),
+        "token": selected.get("instrument_token"),
+        "ltp": (selected.get("quote") or {}).get("ltp"),
+        "oi": (selected.get("quote") or {}).get("open_interest"),
+        "liquidity": (selected.get("quote") or {}).get("liquidity_score"),
+        "raw_keys": selected.get("quote_raw_keys"),
+    }
 
     return {
         "ready": True,
@@ -3097,17 +3377,25 @@ async def evaluate_index_signal(symbol):
         or 0
     )
 
+    # Premium is mandatory. OI is preferred but not a hard kill when depth/LTP
+    # already prove the contract is live (Kotak sometimes omits OI on ltp-only).
     quality_pass = (
         option_ltp is not None
         and
         option_ltp > 0
         and
-        oi is not None
-        and
-        oi > 0
-        and
-        liquidity_score
-        >= OPTION_MIN_LIQUIDITY
+        (
+            (
+                oi is not None
+                and oi > 0
+                and liquidity_score >= OPTION_MIN_LIQUIDITY
+            )
+            or
+            (
+                liquidity_score >= max(40, OPTION_MIN_LIQUIDITY - 20)
+                and option_ltp > 0
+            )
+        )
     )
 
     if not quality_pass:
@@ -5375,6 +5663,12 @@ async def telegram_webhook(
             f"Final actionable: {runtime.get('final_actionable', 0)}\n"
             f"Option filtered/errors: "
             f"{runtime.get('option_filtered', 0)}/{runtime.get('option_errors', 0)}\n"
+            f"Option quote rows/type: "
+            f"{runtime.get('option_quote_last_rows', 0)}/{runtime.get('option_quote_last_type') or 'None'}\n"
+            f"Option quote keys: {runtime.get('option_quote_last_keys') or []}\n"
+            f"Option quote error: {runtime.get('option_quote_last_error') or 'None'}\n"
+            f"Option quote batch errors: {runtime.get('option_quote_batch_errors') or []}\n"
+            f"Option last candidate: {runtime.get('option_quote_last_candidate') or {}}\n"
             f"Warming/No-trade: "
             f"{runtime.get('warming_up', 0)}/{runtime.get('no_trade', 0)}\n"
             f"Last scores: {scores}\n"
