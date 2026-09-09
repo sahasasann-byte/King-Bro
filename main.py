@@ -3044,19 +3044,38 @@ async def auto_discover_option(
     ]
 
     if not usable:
-        # One-line diagnostic: what keys did quote rows actually contain?
+        # Strong diagnostic: show exact LTP values Kotak returned
+        ltp_debug = []
+        for item in inspected:
+            q = item.get("quote") or {}
+            ltp_debug.append({
+                "sym": item.get("trading_symbol"),
+                "token": item.get("instrument_token"),
+                "ltp": q.get("ltp"),
+                "oi": q.get("open_interest"),
+                "keys": (item.get("quote_raw_keys") or [])[:6],
+            })
+        print(
+            f"[OPTION_LTP_DEBUG] {symbol} {direction} "
+            f"checked={len(inspected)} usable=0 data={ltp_debug}",
+            flush=True,
+        )
+        # Keep short sample for status
         sample_keys = []
         for item in inspected[:3]:
             q = item.get("quote") or {}
-            raw = item.get("quote_error") or sorted(
-                [k for k in q.keys() if k != "liquidity_reasons"]
-            )
-            sample_keys.append(str(raw)[:120])
+            sample_keys.append(str(sorted([k for k in q.keys() if k != "liquidity_reasons"])[:8])[:100])
         print(
             f"[OPTION_QUOTE_DIAG] {symbol} {direction} "
             f"checked={len(inspected)} usable=0 keys={sample_keys}",
             flush=True,
         )
+        runtime["option_quote_last_candidate"] = {
+            "symbol": symbol,
+            "direction": direction,
+            "debug": "no_positive_ltp",
+            "candidates": ltp_debug[:5],
+        }
         return {
             "ready": False,
             "reason":
