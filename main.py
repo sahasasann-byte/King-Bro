@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from neo_api_client import NeoAPI
 from neo_api_client.websocket.feed import WsToken, SFeedIndex, SFeedScrip
 
-APP_VERSION = "V8.5-HYBRID-FINAL"
+APP_VERSION = "V8.6-FULL-FIX"
 IST = ZoneInfo("Asia/Kolkata")
 
 app = FastAPI(
@@ -183,6 +183,9 @@ runtime = {
     "stock_unresolved": 0,
     "last_login_at": None,
     "last_tick_at": None,
+    "index_feed_health": "OFFLINE",
+    "last_feed_restart_reason": None,
+    "last_feed_restart_monotonic": 0.0,
     "last_index_signal_at": None,
     "last_stock_signal_at": None,
     "last_index_blocker": None,
@@ -2414,34 +2417,89 @@ def _quote_rows_sync(instrument_tokens, quote_type="all"):
     return rows
 
 
+def _norm_token(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    return text
+
+
+def _norm_symbol(value):
+    return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+
+
 def _quote_row_token(row):
     if not isinstance(row, dict):
         return ""
-    return str(
+    return _norm_token(
         row.get("exchange_token")
+        or row.get("exchangeToken")
         or row.get("instrument_token")
+        or row.get("instrumentToken")
         or row.get("token")
         or row.get("pSymbol")
-        or ""
-    ).strip()
+        or row.get("p_symbol")
+    )
+
+
+def _quote_row_symbol(row):
+    if not isinstance(row, dict):
+        return ""
+    return _norm_symbol(
+        row.get("display_symbol")
+        or row.get("displaySymbol")
+        or row.get("trading_symbol")
+        or row.get("tradingSymbol")
+        or row.get("symbol")
+        or row.get("tsym")
+    )
+
+
+def _candidate_symbol(candidate):
+    return _norm_symbol(
+        candidate.get("trading_symbol")
+        or candidate.get("display_symbol")
+        or candidate.get("symbol")
+    )
 
 
 def _map_rows_to_candidates(rows, candidates):
+    """Map Kotak quote rows robustly by token, then symbol, then request order."""
     mapped = {}
-    by_token = {
-        str(c["instrument_token"]): c
-        for c in candidates
-    }
+    by_token = {_norm_token(c.get("instrument_token")): c for c in candidates}
+    by_symbol = {_candidate_symbol(c): c for c in candidates if _candidate_symbol(c)}
+    used_rows = set()
 
-    for row in rows or []:
+    # Exact token is strongest.
+    for i, row in enumerate(rows or []):
         token = _quote_row_token(row)
         if token and token in by_token:
             mapped[token] = row
+            used_rows.add(i)
 
-    # Some quote payloads omit the token in the row; preserve request order.
-    if not mapped and len(rows or []) == len(candidates):
-        for c, row in zip(candidates, rows):
-            mapped[str(c["instrument_token"])] = row
+    # Kotak LTP payloads may identify rows primarily by display_symbol.
+    for i, row in enumerate(rows or []):
+        if i in used_rows:
+            continue
+        sym = _quote_row_symbol(row)
+        candidate = by_symbol.get(sym)
+        if candidate is not None:
+            token = _norm_token(candidate.get("instrument_token"))
+            if token and token not in mapped:
+                mapped[token] = row
+                used_rows.add(i)
+
+    # Final safe fallback: preserve request order for still-unmatched rows only.
+    remaining_candidates = [
+        c for c in candidates
+        if _norm_token(c.get("instrument_token")) not in mapped
+    ]
+    remaining_rows = [row for i, row in enumerate(rows or []) if i not in used_rows]
+    if len(remaining_rows) == len(remaining_candidates):
+        for c, row in zip(remaining_candidates, remaining_rows):
+            mapped[_norm_token(c.get("instrument_token"))] = row
 
     return mapped
 
@@ -3044,38 +3102,19 @@ async def auto_discover_option(
     ]
 
     if not usable:
-        # Strong diagnostic: show exact LTP values Kotak returned
-        ltp_debug = []
-        for item in inspected:
-            q = item.get("quote") or {}
-            ltp_debug.append({
-                "sym": item.get("trading_symbol"),
-                "token": item.get("instrument_token"),
-                "ltp": q.get("ltp"),
-                "oi": q.get("open_interest"),
-                "keys": (item.get("quote_raw_keys") or [])[:6],
-            })
-        print(
-            f"[OPTION_LTP_DEBUG] {symbol} {direction} "
-            f"checked={len(inspected)} usable=0 data={ltp_debug}",
-            flush=True,
-        )
-        # Keep short sample for status
+        # One-line diagnostic: what keys did quote rows actually contain?
         sample_keys = []
         for item in inspected[:3]:
             q = item.get("quote") or {}
-            sample_keys.append(str(sorted([k for k in q.keys() if k != "liquidity_reasons"])[:8])[:100])
+            raw = item.get("quote_error") or sorted(
+                [k for k in q.keys() if k != "liquidity_reasons"]
+            )
+            sample_keys.append(str(raw)[:120])
         print(
             f"[OPTION_QUOTE_DIAG] {symbol} {direction} "
             f"checked={len(inspected)} usable=0 keys={sample_keys}",
             flush=True,
         )
-        runtime["option_quote_last_candidate"] = {
-            "symbol": symbol,
-            "direction": direction,
-            "debug": "no_positive_ltp",
-            "candidates": ltp_debug[:5],
-        }
         return {
             "ready": False,
             "reason":
@@ -4828,6 +4867,7 @@ async def index_feed_loop():
                 runtime[
                     "index_feed_connected"
                 ] = True
+                runtime["index_feed_health"] = "LIVE"
 
                 runtime[
                     "last_error"
@@ -4926,6 +4966,7 @@ async def index_feed_loop():
                     runtime[
                         "last_tick_at"
                     ] = now
+                    runtime["index_feed_health"] = "LIVE"
 
                     await consume_index_tick(
                         symbol,
@@ -4950,12 +4991,14 @@ async def index_feed_loop():
             runtime[
                 "index_feed_connected"
             ] = False
+            runtime["index_feed_health"] = "OFFLINE"
             return
 
         except Exception as exc:
             runtime[
                 "index_feed_connected"
             ] = False
+            runtime["index_feed_health"] = "OFFLINE"
 
             runtime[
                 "last_error"
@@ -5654,7 +5697,7 @@ async def telegram_webhook(
             f"Broker: "
             f"{'CONNECTED' if runtime['broker_connected'] else 'OFFLINE'}\n"
             f"Index feed: "
-            f"{'LIVE' if runtime['index_feed_connected'] else 'OFFLINE'}\n"
+            f"{runtime.get('index_feed_health') or ('LIVE' if runtime['index_feed_connected'] else 'OFFLINE')}\n"
             f"Re-login required: "
             f"{'YES ⚠️' if runtime.get('relogin_required') else 'NO'}\n"
             f"Last tick age: "
@@ -6053,8 +6096,11 @@ async def restart_index_feed(reason: str):
             pass
 
     runtime["index_feed_connected"] = False
+    runtime["index_feed_health"] = "RECONNECTING"
     runtime["feed_restart_count"] = int(runtime.get("feed_restart_count") or 0) + 1
     runtime["last_feed_restart_at"] = datetime.now(timezone.utc).isoformat()
+    runtime["last_feed_restart_reason"] = reason
+    runtime["last_feed_restart_monotonic"] = time.monotonic()
     print(f"[SUPERVISOR_RESTART_INDEX] {reason}", flush=True)
 
     index_feed_task = asyncio.create_task(
@@ -6126,14 +6172,15 @@ async def supervisor_loop():
 
             # A connected feed that stopped delivering index ticks is stale.
             tick_age = last_tick_age_seconds()
-            if (
-                runtime.get("index_feed_connected")
-                and tick_age is not None
-                and tick_age > FEED_STALE_SECONDS
-            ):
-                await restart_index_feed(
-                    f"last index tick is {int(tick_age)}s old"
-                )
+            if tick_age is not None and tick_age > FEED_STALE_SECONDS:
+                runtime["index_feed_connected"] = False
+                runtime["index_feed_health"] = "STALE"
+                last_restart = float(runtime.get("last_feed_restart_monotonic") or 0.0)
+                # Avoid restart storms; give a fresh WebSocket time to establish.
+                if time.monotonic() - last_restart >= 90:
+                    await restart_index_feed(
+                        f"last index tick is {int(tick_age)}s old"
+                    )
 
             if runtime.get("stock_scan_enabled"):
                 if stock_feed_task is None or stock_feed_task.done():
