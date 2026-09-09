@@ -1,0 +1,25 @@
+KING BRO V8.3 MEMORY SAFE
+
+What changed
+- Signal strategy, score thresholds, option filter, R:R and 22/21/9 readiness gates are unchanged.
+- Index in-RAM history is bounded to 780 x 1m, 100 x 5m, 60 x 15m per index.
+  780 keeps enough 1m history for a full prior NSE session plus current-session margin,
+  preserving previous-session pivot/CPR calculations.
+- Stock buffers are reduced but remain safely above the old stock-strategy readiness needs.
+- Stock candle history is omitted from Gist serialization while stock scan is OFF.
+- Historical REST responses and temporary JSON/Gist payload copies are explicitly released.
+- gc.collect() is run after historical preload and large state-save operations.
+- /status and /health expose memory RSS and active buffer limits.
+
+Why not trim 1m to 150?
+Daily pivot/CPR logic uses previous-session H/L/C from 1m candles. A too-small 1m buffer could keep only
+part of the prior session and alter signals. 780 avoids that while still lowering memory and JSON size.
+
+Expected
+- Historical preload still gives >=22/21/9 immediately.
+- Same signal-generation logic.
+- Lower memory peaks during historical preload and Gist saves.
+- Stock scan remains OFF by default.
+
+If Render still reports a memory-limit restart with stock scan OFF, the next target is the SDK/pandas
+baseline or a platform-size issue, not the candle strategy. Use /status Memory RSS peak to verify.

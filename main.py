@@ -1,4 +1,6 @@
 import asyncio
+import gc
+import resource
 import inspect
 import json
 import os
@@ -17,7 +19,7 @@ from pydantic import BaseModel, Field
 from neo_api_client import NeoAPI
 from neo_api_client.websocket.feed import WsToken, SFeedIndex, SFeedScrip
 
-APP_VERSION = "V8.2-SMART-FIX"
+APP_VERSION = "V8.3-MEMORY-SAFE"
 IST = ZoneInfo("Asia/Kolkata")
 
 app = FastAPI(
@@ -94,10 +96,9 @@ INDEX_NEED_1M = 22
 INDEX_NEED_5M = 21
 INDEX_NEED_15M = 9
 
-MAX_1M = 900
-MAX_5M = 240
-MAX_15M = 200
-
+MAX_1M = int(os.getenv("KINGBRO_MAX_1M", "780") or 780)
+MAX_5M = int(os.getenv("KINGBRO_MAX_5M", "100") or 100)
+MAX_15M = int(os.getenv("KINGBRO_MAX_15M", "60") or 60)
 # Exact old public signal thresholds.
 A_PLUS_SCORE = 80
 STRONG_SCORE = 70
@@ -125,10 +126,9 @@ STOCK_UNIVERSE = (
 STOCK_NEED_1M = 22
 STOCK_NEED_5M = 9
 STOCK_NEED_15M = 3
-STOCK_MAX_1M = 180
-STOCK_MAX_5M = 120
-STOCK_MAX_15M = 80
-
+STOCK_MAX_1M = int(os.getenv("KINGBRO_STOCK_MAX_1M", "90") or 90)
+STOCK_MAX_5M = int(os.getenv("KINGBRO_STOCK_MAX_5M", "45") or 45)
+STOCK_MAX_15M = int(os.getenv("KINGBRO_STOCK_MAX_15M", "20") or 20)
 # =========================================================
 # STATE
 # =========================================================
@@ -220,6 +220,28 @@ runtime = {
 # =========================================================
 class TotpRequest(BaseModel):
     totp: str = Field(min_length=6, max_length=6)
+
+
+def memory_rss_mb():
+    """Best-effort resident-set diagnostic for Render/Linux."""
+    try:
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # Linux ru_maxrss is KiB; macOS is bytes. Render is Linux.
+        return round(float(rss) / 1024.0, 1)
+    except Exception:
+        return None
+
+
+def compact_runtime_memory(reason="manual"):
+    """Release temporary historical/JSON objects without touching strategy state."""
+    try:
+        collected = gc.collect()
+    except Exception:
+        collected = 0
+    runtime["last_gc_reason"] = reason
+    runtime["last_gc_collected"] = collected
+    runtime["memory_rss_mb"] = memory_rss_mb()
+    return collected
 
 # =========================================================
 # GENERIC HELPERS
@@ -744,18 +766,33 @@ def serialisable_state():
         },
 
         # Compact stock history. Used only if STOCK scan was enabled.
-        "stock_candles_1m": {
-            s: list(stock_candles_1m[s])[-60:]
-            for s in STOCK_UNIVERSE
-        },
-        "stock_candles_5m": {
-            s: list(stock_candles_5m[s])[-30:]
-            for s in STOCK_UNIVERSE
-        },
-        "stock_candles_15m": {
-            s: list(stock_candles_15m[s])[-12:]
-            for s in STOCK_UNIVERSE
-        },
+        "stock_candles_1m": (
+            {
+                s: list(stock_candles_1m[s])[-60:]
+                for s in STOCK_UNIVERSE
+                if stock_candles_1m[s]
+            }
+            if runtime.get("stock_scan_enabled")
+            else {}
+        ),
+        "stock_candles_5m": (
+            {
+                s: list(stock_candles_5m[s])[-30:]
+                for s in STOCK_UNIVERSE
+                if stock_candles_5m[s]
+            }
+            if runtime.get("stock_scan_enabled")
+            else {}
+        ),
+        "stock_candles_15m": (
+            {
+                s: list(stock_candles_15m[s])[-12:]
+                for s in STOCK_UNIVERSE
+                if stock_candles_15m[s]
+            }
+            if runtime.get("stock_scan_enabled")
+            else {}
+        ),
     }
 
 
@@ -766,24 +803,31 @@ def save_state_sync():
     ):
         return False
 
+    state_payload = serialisable_state()
     content = json.dumps(
-        serialisable_state(),
+        state_payload,
         separators=(",", ":"),
     )
 
-    gist_request(
-        "PATCH",
-        f"/gists/{STATE_GIST_ID}",
-        {
-            "files": {
-                STATE_GIST_FILENAME: {
-                    "content": content
+    try:
+        gist_request(
+            "PATCH",
+            f"/gists/{STATE_GIST_ID}",
+            {
+                "files": {
+                    STATE_GIST_FILENAME: {
+                        "content": content
+                    }
                 }
-            }
-        },
-    )
-
-    return True
+            },
+        )
+        return True
+    finally:
+        # json.dumps + HTTP payload temporarily duplicate candle history.
+        # Drop both immediately so Render free-memory peaks stay low.
+        del content
+        del state_payload
+        gc.collect()
 
 
 async def save_state(force=False):
@@ -4129,7 +4173,7 @@ def historical_backfill_sync(client):
 
         # First get enough REAL 1m history. This is the most reliable way to
         # make all three timeframes internally consistent.
-        one_ok = len(candles_1m[symbol]) >= 150
+        one_ok = len(candles_1m[symbol]) >= min(MAX_1M, 450)
         last_error = None
         if not one_ok:
             for interval in interval_variants[1]:
@@ -4145,10 +4189,17 @@ def historical_backfill_sync(client):
                     if rows:
                         added = _merge_history(candles_1m[symbol], rows, 1)
                         total += added
-                        if len(candles_1m[symbol]) >= INDEX_NEED_1M:
+                        del rows
+                        del response
+                        gc.collect()
+                        # Enough history for previous-session pivots + intraday indicators.
+                        if len(candles_1m[symbol]) >= min(MAX_1M, 450):
                             break
                     else:
                         last_error = f"{interval}: no candle rows returned"
+                        del rows
+                        del response
+                        gc.collect()
                 except Exception as exc:
                     last_error = f"{interval}: {type(exc).__name__}: {exc}"
 
@@ -4176,10 +4227,16 @@ def historical_backfill_sync(client):
                     rows = _historical_rows(response)
                     if rows:
                         total += _merge_history(target, rows, minutes)
+                        del rows
+                        del response
+                        gc.collect()
                         if len(target) >= need:
                             break
                     else:
                         tf_error = f"{interval}: no candle rows returned"
+                        del rows
+                        del response
+                        gc.collect()
                 except Exception as exc:
                     tf_error = f"{interval}: {type(exc).__name__}: {exc}"
             if len(target) < need and tf_error:
@@ -4191,6 +4248,7 @@ def historical_backfill_sync(client):
     runtime["historical_backfill_attempted"] = True
     runtime["historical_backfill_loaded"] = total
     runtime["historical_backfill_error"] = "; ".join(errors[:6]) if errors else None
+    compact_runtime_memory("historical_backfill_complete")
 
     print(
         "[HISTORY_READY_CHECK] "
@@ -5309,7 +5367,9 @@ async def telegram_webhook(
             f"Historical error: {runtime.get('historical_backfill_error') or 'None'}\n"
             f"Historical SDK: {runtime.get('historical_sdk_signature') or 'not inspected'}\n"
             f"Historical request: {runtime.get('historical_last_request') or 'None'}\n"
-            f"TF repair: {runtime.get('timeframe_repair') or {}}\n\n"
+            f"TF repair: {runtime.get('timeframe_repair') or {}}\n"
+            f"Memory RSS peak: {memory_rss_mb() or 'N/A'} MB\n"
+            f"Buffers: 1M {MAX_1M}, 5M {MAX_5M}, 15M {MAX_15M}\n\n"
             f"Evaluations: {runtime.get('evaluations', 0)}\n"
             f"Technical actionable: {runtime.get('technical_actionable', 0)}\n"
             f"Final actionable: {runtime.get('final_actionable', 0)}\n"
@@ -5537,6 +5597,8 @@ async def health():
             "historical_backfill_attempted": runtime.get("historical_backfill_attempted"),
             "historical_backfill_loaded": runtime.get("historical_backfill_loaded"),
             "historical_backfill_error": runtime.get("historical_backfill_error"),
+            "memory_rss_mb": memory_rss_mb(),
+            "buffer_limits": {"1m": MAX_1M, "5m": MAX_5M, "15m": MAX_15M},
         },
         "stocks": {
             "scan_enabled": runtime["stock_scan_enabled"],
